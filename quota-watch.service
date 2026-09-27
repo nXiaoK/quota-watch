@@ -1,0 +1,25 @@
+[Unit]
+Description=Quota Watch account monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=quota-watch
+Group=quota-watch
+WorkingDirectory=/opt/quota-watch
+EnvironmentFile=/etc/quota-watch.env
+ExecStart=/opt/quota-watch/quota-watch -listen 127.0.0.1:8091 -data-dir /var/lib/quota-watch
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=45
+StateDirectory=quota-watch
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/quota-watch
+
+[Install]
+WantedBy=multi-user.target

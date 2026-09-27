@@ -1,0 +1,27 @@
+services:
+  quota-watch:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8091:8091"
+    environment:
+      QUOTA_WATCH_LISTEN: "0.0.0.0:8091"
+      QUOTA_WATCH_DATA_DIR: /data
+      QUOTA_WATCH_USERNAME: ${QUOTA_WATCH_USERNAME:-admin}
+      QUOTA_WATCH_PASSWORD: ${QUOTA_WATCH_PASSWORD:?请在 .env 中设置管理页密码}
+      QUOTA_WATCH_MASTER_KEY: ${QUOTA_WATCH_MASTER_KEY:-}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - quota-watch-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8091/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  quota-watch-data:
