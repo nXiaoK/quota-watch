@@ -49,6 +49,7 @@ func NewUpdater(store *Store, engine *Engine, logger *slog.Logger) *Updater {
 			if err == nil {
 				client.logger = logger
 				client.logEnabled = store.VerboseLoggingEnabled
+				client.logSource = "auto_update"
 			}
 			return client, err
 		},
@@ -142,6 +143,7 @@ func (u *Updater) Tick(ctx context.Context) error {
 	}
 	latest, exists, err := client.LatestUsage(ctx)
 	if err != nil {
+		u.logDiagnostic("idle_check", "read_failed", "step", "initial")
 		return u.recordUpdateError(cfg, "waiting_idle", fmt.Errorf("读取使用记录失败: %w", err))
 	}
 	idle, err := u.observeIdle(cfg, now, latest, exists)
@@ -158,14 +160,23 @@ func (u *Updater) Tick(ctx context.Context) error {
 func (u *Updater) checkVersion(ctx context.Context, cfg Config, client updateAPI, now time.Time, inside bool, day string) error {
 	info, err := client.CheckUpdates(ctx)
 	if err != nil {
+		u.logDiagnostic("version_check", "failed")
 		return u.recordCheckError(cfg, now, err)
 	}
 	if info.Warning != "" {
+		u.logDiagnostic("version_check", "warning")
 		return u.recordCheckError(cfg, now, errors.New(info.Warning))
 	}
 	if info.CurrentVersion == "" || info.LatestVersion == "" || info.BuildType != "release" {
+		u.logDiagnostic("version_check", "unsupported", "build_type", info.BuildType)
 		return u.recordCheckError(cfg, now, errors.New("主站未返回可自动更新的发布版本"))
 	}
+	status := "up_to_date"
+	if info.HasUpdate {
+		status = "available"
+	}
+	u.logDiagnostic("version_check", status, "current_version", info.CurrentVersion, "latest_version", info.LatestVersion,
+		"build_type", info.BuildType, "cached", info.Cached, "inside_window", inside)
 	return u.setUpdateState(cfg, func(s *UpdateState) {
 		s.LastCheckAt = now
 		s.CurrentVersion = info.CurrentVersion
@@ -204,11 +215,28 @@ func (u *Updater) observeIdle(cfg Config, now, latest time.Time, exists bool) (b
 			s.Status = "waiting_idle"
 		}
 	})
+	if err == nil {
+		status := "waiting"
+		if idle {
+			status = "idle"
+		}
+		quietSince := firstEmpty
+		if exists {
+			quietSince = latest
+		}
+		quietSeconds := int64(now.Sub(quietSince).Seconds())
+		if quietSeconds < 0 {
+			quietSeconds = 0
+		}
+		u.logDiagnostic("idle_check", status, "usage_record_found", exists, "quiet_seconds", quietSeconds,
+			"required_seconds", int64(updateIdlePeriod.Seconds()))
+	}
 	return idle, err
 }
 
 func (u *Updater) perform(ctx context.Context, cfg Config, client updateAPI, now time.Time, day, trigger string) error {
 	if !u.engine.busy.CompareAndSwap(false, true) {
+		u.logDiagnostic("update", "engine_busy")
 		return nil
 	}
 	defer u.engine.busy.Store(false)
@@ -217,6 +245,7 @@ func (u *Updater) perform(ctx context.Context, cfg Config, client updateAPI, now
 		return err
 	}
 	if current.BaseURL != cfg.BaseURL || current.AdminAPIKey != cfg.AdminAPIKey || !sameUpdateTriggerSettings(current.Update, cfg.Update) {
+		u.logDiagnostic("update", "config_changed")
 		return nil
 	}
 	// A slow version or usage query can cross the end of the scheduled window.
@@ -227,6 +256,7 @@ func (u *Updater) perform(ctx context.Context, cfg Config, client updateAPI, now
 			return err
 		}
 		if !inside {
+			u.logDiagnostic("update", "window_closed")
 			return nil
 		}
 	}
@@ -241,6 +271,7 @@ func (u *Updater) perform(ctx context.Context, cfg Config, client updateAPI, now
 	}
 	latest, exists, err := client.LatestUsage(ctx)
 	if err != nil {
+		u.logDiagnostic("idle_check", "read_failed", "step", "before_update")
 		return u.recordUpdateError(cfg, "waiting_idle", fmt.Errorf("更新前复查使用记录失败: %w", err))
 	}
 	idle, err := u.observeIdle(cfg, u.now().UTC(), latest, exists)
@@ -253,6 +284,7 @@ func (u *Updater) perform(ctx context.Context, cfg Config, client updateAPI, now
 			return err
 		}
 		if !inside {
+			u.logDiagnostic("update", "window_closed")
 			return nil
 		}
 	} else if trigger == "scheduled" {
@@ -305,6 +337,7 @@ func (u *Updater) perform(ctx context.Context, cfg Config, client updateAPI, now
 		return errors.Join(err, restoreAttempt())
 	}
 	if current.BaseURL != cfg.BaseURL || current.AdminAPIKey != cfg.AdminAPIKey || !sameUpdateTriggerSettings(current.Update, cfg.Update) {
+		u.logDiagnostic("update", "config_changed")
 		return restoreAttempt()
 	}
 	// Persisting the attempt can cross the end of the scheduled window.
@@ -312,15 +345,19 @@ func (u *Updater) perform(ctx context.Context, cfg Config, client updateAPI, now
 	if !cfg.Update.IdleEnabled {
 		inside, _, _, err := updateWindow(u.now().UTC(), cfg.Update)
 		if err != nil || !inside {
+			u.logDiagnostic("update", "window_closed")
 			return errors.Join(err, restoreAttempt())
 		}
 	}
 	u.logger.Info("Sub2API 自动更新开始", "trigger", trigger, "target_version", state.Update.LatestVersion)
+	u.logDiagnostic("update", "requested", "trigger", trigger, "target_version", state.Update.LatestVersion)
 	result, err := client.PerformSystemUpdate(ctx, opID+"-update")
 	if err != nil {
+		u.logDiagnostic("update", mutationOutcome(err))
 		return u.recordUpdateError(cfg, mutationOutcome(err), err)
 	}
 	if result.AlreadyUpToDate {
+		u.logDiagnostic("update", "already_up_to_date")
 		return u.setUpdateState(cfg, func(s *UpdateState) {
 			s.Status = "up_to_date"
 			s.HasUpdate = false
@@ -328,19 +365,27 @@ func (u *Updater) perform(ctx context.Context, cfg Config, client updateAPI, now
 		})
 	}
 	if !result.NeedRestart {
+		u.logDiagnostic("update", "restart_not_confirmed")
 		return u.recordUpdateError(cfg, "unknown", errors.New("更新接口未确认需要重启，请在 Sub2API 核对版本"))
 	}
+	u.logDiagnostic("update", "applied")
 	if err := u.setUpdateState(cfg, func(s *UpdateState) { s.Status = "restarting" }); err != nil {
 		return err
 	}
+	u.logDiagnostic("restart", "requested")
 	restartErr := client.RestartSystem(ctx, opID+"-restart")
 	if restartErr != nil {
+		u.logDiagnostic("restart", "response_error")
 		u.logger.Warn("Sub2API 重启响应异常，等待版本核对", "error", restartErr)
+	} else {
+		u.logDiagnostic("restart", "accepted")
 	}
 	verified, verifyErr := u.verifyRestart(ctx, client, state.Update.CurrentVersion, state.Update.LatestVersion)
 	if verified != "" {
+		u.logDiagnostic("version_verify", "confirmed", "running_version", verified)
 		return u.markSuccess(cfg, verified, u.now().UTC())
 	}
+	u.logDiagnostic("version_verify", "not_confirmed", "target_version", state.Update.LatestVersion)
 	if restartErr != nil {
 		return u.recordUpdateError(cfg, mutationOutcome(restartErr), restartErr)
 	}
@@ -373,6 +418,7 @@ func (u *Updater) verifyRestart(ctx context.Context, client updateAPI, oldVersio
 func (u *Updater) reconcile(ctx context.Context, cfg Config, client updateAPI, state UpdateState, now time.Time) error {
 	version, err := client.RunningVersion(ctx)
 	if err == nil && version != "" && version != state.CurrentVersion && versionAtLeast(version, state.LastAttemptVersion) {
+		u.logDiagnostic("version_verify", "confirmed", "running_version", version, "step", "reconcile")
 		return u.markSuccess(cfg, version, now)
 	}
 	if state.Status == "unknown" {
@@ -381,6 +427,7 @@ func (u *Updater) reconcile(ctx context.Context, cfg Config, client updateAPI, s
 	if now.Sub(state.LastAttemptAt) < 20*time.Minute {
 		return nil
 	}
+	u.logDiagnostic("version_verify", "not_confirmed", "step", "reconcile")
 	return u.recordUpdateError(cfg, "unknown", errors.New("自动更新结果未知，请在 Sub2API 核对运行版本"))
 }
 
@@ -530,6 +577,16 @@ func (u *Updater) setUpdateState(cfg Config, change func(*UpdateState)) error {
 		change(&state.Update)
 		return nil
 	})
+}
+
+func (u *Updater) logDiagnostic(phase, status string, attrs ...any) {
+	if !u.store.VerboseLoggingEnabled() {
+		return
+	}
+	fields := make([]any, 0, 4+len(attrs))
+	fields = append(fields, "phase", phase, "status", status)
+	fields = append(fields, attrs...)
+	u.logger.Info("Sub2API 自动更新", fields...)
 }
 
 func mutationOutcome(err error) string {

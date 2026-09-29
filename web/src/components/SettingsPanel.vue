@@ -81,8 +81,8 @@ function submit(action: 'save' | 'connection' | 'telegram' | 'email') {
         <label class="toggle-row"><span><strong>全局自动重置</strong><small>开启后，仅执行同样开启“自动重置”的规则；关闭时继续检测，并可通过 Telegram 手动确认重置</small></span><input v-model="draft.auto_reset_enabled" class="switch" type="checkbox" role="switch" aria-label="全局自动重置" /></label>
         <p class="muted caption">全局自动重置关闭时，启用 Telegram 并在规则中选择 Telegram、目标订阅和额度周期。检测到归零后，通知内可选择重置或忽略，无需开启规则的自动重置。</p>
         <p class="muted caption">主站快照变化会复核并持久化去重。订阅重置只清零选中周期的用量，不调整订阅到期时间。</p>
-        <label class="toggle-row"><span><strong>详细运行日志</strong><small>记录 Sub2API 请求的方法、接口路径、响应状态与耗时，以及快照检查状态。默认关闭，保存后立即生效。</small></span><input v-model="draft.verbose_logging" class="switch" type="checkbox" role="switch" aria-label="详细运行日志" /></label>
-        <p class="muted caption">在 Docker 中使用 <code class="mono">docker compose logs -f quota-watch</code> 实时查看。日志不记录管理员 Key、Cookie 或请求与响应正文。</p>
+        <label class="toggle-row"><span><strong>详细运行日志</strong><small>记录快照检查、自动更新的检查/空闲/重启核对阶段，以及 Sub2API 接口请求的状态与耗时。默认关闭，保存后立即生效。</small></span><input v-model="draft.verbose_logging" class="switch" type="checkbox" role="switch" aria-label="详细运行日志" /></label>
+        <p class="muted caption">在 Docker 中使用 <code class="mono">docker compose logs -f quota-watch</code> 实时查看。关闭后不输出接口明细，更新开始、成功及异常仍会记录；日志不包含管理员 Key、Cookie 或请求与响应正文。</p>
       </div>
     </section>
     <section class="panel settings-section">

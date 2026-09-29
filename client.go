@@ -47,6 +47,7 @@ type AdminClient struct {
 	http              *http.Client
 	logger            *slog.Logger
 	logEnabled        func() bool
+	logSource         string
 	subscriptionMu    sync.Mutex
 	subscriptionHints map[int64]subscriptionHint
 }

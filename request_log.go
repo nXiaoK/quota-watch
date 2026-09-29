@@ -47,6 +47,9 @@ func (c *AdminClient) startRequestLog(ctx context.Context, method, route string,
 		slog.String("host", c.baseURL.Host),
 		slog.String("path", path),
 	}
+	if c.logSource != "" {
+		attrs = append(attrs, slog.String("source", c.logSource))
+	}
 	if allowed {
 		if safeQuery := safeRequestLogQuery(query); safeQuery != "" {
 			attrs = append(attrs, slog.String("query", safeQuery))
@@ -104,7 +107,7 @@ func (entry *adminRequestLog) end() {
 
 func safeRequestLogQuery(query url.Values) string {
 	safe := make(url.Values)
-	for _, name := range []string{"page", "page_size", "user_id", "group_id", "group", "platform", "type", "status", "sort_by", "sort_order", "lite", "include_scheduler_score", "search"} {
+	for _, name := range []string{"page", "page_size", "user_id", "group_id", "group", "platform", "type", "status", "sort_by", "sort_order", "lite", "include_scheduler_score", "force", "search"} {
 		values, exists := query[name]
 		if !exists {
 			continue
@@ -137,6 +140,10 @@ func safeRequestLogQuery(query url.Values) string {
 				}
 			case "sort_order":
 				if raw == "asc" || raw == "desc" {
+					value = raw
+				}
+			case "force":
+				if raw == "true" {
 					value = raw
 				}
 			case "lite", "include_scheduler_score":
