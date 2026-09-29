@@ -1,17 +1,23 @@
 <script setup lang="ts">
 import { computed, ref, toRaw, watch } from 'vue'
 import { dateTime, statusText } from '../format'
-import type { Config, TelegramReceiverState } from '../types'
+import type { Config, TelegramReceiverState, UpdateState } from '../types'
 import UiIcon from './UiIcon.vue'
 
-const props = defineProps<{ config: Config; receiver: TelegramReceiverState; saving: boolean; testingConnection: boolean; testingTelegram: boolean; testingEmail: boolean }>()
-const emit = defineEmits<{ save: [config: Config]; testConnection: [config: Config]; testNotification: [channel: 'telegram' | 'email', config: Config] }>()
+const props = defineProps<{ config: Config; receiver: TelegramReceiverState; update: UpdateState; acknowledgingUpdate: boolean; acknowledgeError: string; saving: boolean; testingConnection: boolean; testingTelegram: boolean; testingEmail: boolean }>()
+const emit = defineEmits<{ save: [config: Config]; testConnection: [config: Config]; testNotification: [channel: 'telegram' | 'email', config: Config]; acknowledgeUpdate: [] }>()
 const draft = ref<Config>(structuredClone(toRaw(props.config)))
 const recipients = ref(props.config.email.recipients.join('\n'))
 const allowedUsers = ref((props.config.telegram.allowed_user_ids ?? []).join('\n'))
 const validation = ref('')
 const sourceChanged = computed(() => draft.value.base_url.trim().replace(/\/+$/, '') !== props.config.base_url.trim().replace(/\/+$/, ''))
 const telegramGroup = computed(() => /^(?:-|@)/.test(draft.value.telegram.chat_id.trim()))
+const updateStatus = computed(() => ({
+  disabled: '已关闭', up_to_date: '已是最新版本', available: '发现新版本', waiting_idle: '等待空闲',
+  checking: '正在检查更新', check_failed: '检查更新失败', updating: '正在更新', restarting: '等待站点重启',
+  success: '更新成功', failed: '更新失败', unknown: '结果待核对', already_attempted: '已尝试此版本',
+} as Record<string, string>)[props.update.status] ?? (props.update.status || '尚无记录'))
+const updateTrigger = computed(() => props.update.last_trigger === 'idle' ? '空闲触发' : props.update.last_trigger === 'scheduled' ? '定时触发' : props.update.last_trigger || '')
 
 watch(() => props.config, (config) => {
   draft.value = structuredClone(toRaw(config))
@@ -26,6 +32,15 @@ function payload(): Config | null {
   else if (!Number.isInteger(draft.value.poll_interval_seconds) || draft.value.poll_interval_seconds < 10) validation.value = '检测间隔必须是至少 10 秒的整数。'
   else if (!Number.isInteger(draft.value.confirm_delay_seconds) || draft.value.confirm_delay_seconds < 1 || draft.value.confirm_delay_seconds > 60) validation.value = '复核间隔必须是 1 至 60 秒的整数。'
   else if (!Number.isInteger(draft.value.concurrency) || draft.value.concurrency < 1 || draft.value.concurrency > 20) validation.value = '并行读取数必须是 1 至 20 的整数。'
+  const update = draft.value.update
+  const timePattern = /^(?:[01]\d|2[0-3]):[0-5]\d$/
+  if (!validation.value && (!timePattern.test(update.window_start) || !timePattern.test(update.window_end))) validation.value = '自动更新时段请填写有效的 24 小时时间。'
+  else if (!validation.value && update.window_start >= update.window_end) validation.value = '自动更新时段的结束时间必须晚于开始时间，且应在同一天。'
+  update.timezone = update.timezone.trim()
+  if (!validation.value) {
+    try { new Intl.DateTimeFormat('en-US', { timeZone: update.timezone }).format(0) }
+    catch { validation.value = '请输入有效的 IANA 时区，例如 Asia/Shanghai。' }
+  }
   const userIDs = allowedUsers.value.split(/[\s,;，；]+/).filter(Boolean)
   if (!validation.value && userIDs.some((value) => !/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) <= 0)) validation.value = '允许操作的 Telegram 用户 ID 必须是正整数，每行一个或使用逗号分隔。'
   if (validation.value) return null
@@ -54,7 +69,7 @@ function submit(action: 'save' | 'connection' | 'telegram' | 'email') {
         <label class="field"><span>管理员 API Key <span v-if="config.admin_api_key_configured" class="status-pill success">已配置</span></span><input v-model="draft.admin_api_key" type="password" autocomplete="new-password" spellcheck="false" :placeholder="config.admin_api_key_configured ? '留空保留已保存的密钥' : '填入管理员 API Key'" :disabled="draft.clear_admin_api_key" /><small>使用主站已有的管理员 Key；重生成主站 Key 会使旧连接失效。</small></label>
         <label v-if="config.admin_api_key_configured" class="checkbox-label"><input v-model="draft.clear_admin_api_key" type="checkbox" /> 清除已保存的管理员 API Key</label>
         <div class="inline-message muted-note">管理员 Key 具有管理权限，凭据仅由服务端保存。输入留空时保留原值，保存后页面会清空输入框。</div>
-        <div v-if="sourceChanged && config.base_url" class="inline-message warning">切换源站会停用已有规则、清除检测基线并跳过未执行的旧动作。请重新核对账号与订阅 ID 后启用规则。</div>
+        <div v-if="sourceChanged && config.base_url" class="inline-message warning">切换源站会停用已有规则和自动更新、清除检测基线并跳过未执行的旧动作。请重新核对站点、账号与订阅 ID 后重新启用。</div>
         <button class="button secondary" type="button" :disabled="testingConnection || saving" @click="submit('connection')"><UiIcon name="link" :size="17" /> {{ testingConnection ? '正在连接…' : '测试管理员 API 连接' }}</button>
       </div>
     </section>
@@ -68,6 +83,33 @@ function submit(action: 'save' | 'connection' | 'telegram' | 'email') {
         <p class="muted caption">主站快照变化会复核并持久化去重。订阅重置只清零选中周期的用量，不调整订阅到期时间。</p>
         <label class="toggle-row"><span><strong>详细运行日志</strong><small>记录 Sub2API 请求的方法、接口路径、响应状态与耗时，以及快照检查状态。默认关闭，保存后立即生效。</small></span><input v-model="draft.verbose_logging" class="switch" type="checkbox" role="switch" aria-label="详细运行日志" /></label>
         <p class="muted caption">在 Docker 中使用 <code class="mono">docker compose logs -f quota-watch</code> 实时查看。日志不记录管理员 Key、Cookie 或请求与响应正文。</p>
+      </div>
+    </section>
+    <section class="panel settings-section">
+      <div class="panel-heading"><div class="section-title"><span class="section-icon"><UiIcon name="refresh" /></span><div><h2>Sub2API 自动更新</h2><p class="muted">发现新版本后按空闲或指定时段更新站点</p></div></div></div>
+      <div class="settings-body">
+        <label class="toggle-row"><span><strong>空闲时自动更新</strong><small>需要连续 10 分钟没有任何使用记录；记录读取失败时不会判断为空闲。</small></span><input v-model="draft.update.idle_enabled" class="switch" type="checkbox" role="switch" aria-label="空闲时自动更新 Sub2API" /></label>
+        <label class="toggle-row"><span><strong>指定时段自动更新</strong><small>每天在下方时段内检查新版本，并等待满足连续 10 分钟无使用记录；窗口结束仍不空闲就跳过当天。</small></span><input v-model="draft.update.scheduled_enabled" class="switch" type="checkbox" role="switch" aria-label="指定时段自动更新 Sub2API" /></label>
+        <div class="form-grid three update-window"><label class="field"><span>开始时间</span><input v-model="draft.update.window_start" type="time" step="60" /></label><label class="field"><span>结束时间</span><input v-model="draft.update.window_end" type="time" step="60" /></label><label class="field"><span>时区</span><input v-model="draft.update.timezone" type="text" placeholder="Asia/Shanghai" autocomplete="off" /><small>使用 IANA 时区名称。</small></label></div>
+        <p class="muted caption">两个开关可以独立使用；指定时段默认是 Asia/Shanghai 每天 02:00–03:00。自动更新与上方的订阅自动重置分别控制。</p>
+        <div class="inline-message warning">Sub2API 若运行在 Docker 容器中，API 原地更新不会写回镜像，重建容器后更新会丢失；请通过更新镜像部署新版本。</div>
+        <div class="action-record">
+          <div class="action-record-heading"><div><strong>最近更新状态</strong><span class="status-pill" :class="{ success: ['up_to_date', 'success'].includes(update.status), error: ['check_failed', 'failed', 'unknown'].includes(update.status) }">{{ updateStatus }}</span></div></div>
+          <div class="update-status-grid">
+            <p class="caption muted">当前版本：{{ update.current_version || '—' }}</p>
+            <p class="caption muted">最新版本：{{ update.latest_version || '—' }}</p>
+            <p class="caption muted">最近检查：{{ dateTime(update.last_check_at) }}</p>
+            <p class="caption muted">最近尝试：{{ dateTime(update.last_attempt_at) }}</p>
+            <p class="caption muted">最近成功：{{ dateTime(update.last_success_at) }}</p>
+            <p class="caption muted">触发方式：{{ updateTrigger || '—' }}</p>
+          </div>
+          <p v-if="update.last_error" class="error-text">{{ update.last_error }}</p>
+          <div v-if="update.status === 'unknown'" class="update-recovery">
+            <p class="caption muted">请先在 Sub2API 核对当前版本；必要时手动重启并确认站点恢复，再允许自动更新重新尝试。</p>
+            <button class="button small secondary" type="button" :disabled="acknowledgingUpdate" @click="emit('acknowledgeUpdate')"><UiIcon name="check" :size="15" /> {{ acknowledgingUpdate ? '正在确认…' : '已核对，允许再次自动尝试' }}</button>
+            <div v-if="acknowledgeError" class="inline-message error" role="alert">{{ acknowledgeError }}</div>
+          </div>
+        </div>
       </div>
     </section>
     <section class="panel settings-section">

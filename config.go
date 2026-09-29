@@ -6,14 +6,16 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 )
 
 type ConfigInput struct {
 	Config
-	ClearAdminAPIKey   bool `json:"clear_admin_api_key"`
-	ClearTelegramToken bool `json:"clear_telegram_token"`
-	ClearTelegramProxy bool `json:"clear_telegram_proxy"`
-	ClearSMTPPassword  bool `json:"clear_smtp_password"`
+	Update             *UpdateConfig `json:"update"`
+	ClearAdminAPIKey   bool          `json:"clear_admin_api_key"`
+	ClearTelegramToken bool          `json:"clear_telegram_token"`
+	ClearTelegramProxy bool          `json:"clear_telegram_proxy"`
+	ClearSMTPPassword  bool          `json:"clear_smtp_password"`
 }
 
 func mergeConfig(input ConfigInput, previous Config) (Config, error) {
@@ -27,6 +29,16 @@ func mergeConfig(input ConfigInput, previous Config) (Config, error) {
 	cfg.Email.Host = strings.TrimSpace(cfg.Email.Host)
 	cfg.Email.Username = strings.TrimSpace(cfg.Email.Username)
 	cfg.Email.From = strings.TrimSpace(cfg.Email.From)
+	if input.Update == nil {
+		cfg.Update = previous.Update
+	} else {
+		cfg.Update = *input.Update
+	}
+	cfg.Update = normalizeUpdateConfig(cfg.Update)
+	if previous.BaseURL != "" && cfg.BaseURL != previous.BaseURL {
+		cfg.Update.IdleEnabled = false
+		cfg.Update.ScheduledEnabled = false
+	}
 	if cfg.AdminAPIKey == "" && !input.ClearAdminAPIKey {
 		cfg.AdminAPIKey = previous.AdminAPIKey
 	}
@@ -85,6 +97,15 @@ func mergeConfig(input ConfigInput, previous Config) (Config, error) {
 	if strings.ContainsAny(cfg.AdminAPIKey, "\r\n") {
 		return Config{}, errors.New("管理员 Key 包含无效字符")
 	}
+	if (cfg.Update.IdleEnabled || cfg.Update.ScheduledEnabled) && (cfg.BaseURL == "" || cfg.AdminAPIKey == "") {
+		return Config{}, errors.New("启用自动更新前请配置 Sub2API 地址和管理员 Key")
+	}
+	if !validUpdateTime(cfg.Update.WindowStart) || !validUpdateTime(cfg.Update.WindowEnd) || cfg.Update.WindowEnd <= cfg.Update.WindowStart {
+		return Config{}, errors.New("自动更新时段必须是同一天内递增的 HH:MM 时间")
+	}
+	if _, err := time.LoadLocation(cfg.Update.Timezone); err != nil || cfg.Update.Timezone == "Local" {
+		return Config{}, errors.New("自动更新时区无效，请填写 IANA 时区，例如 Asia/Shanghai")
+	}
 	if cfg.Telegram.Enabled && (cfg.Telegram.BotToken == "" || cfg.Telegram.ChatID == "") {
 		return Config{}, errors.New("启用 Telegram 时请填写 Token 和 Chat ID")
 	}
@@ -139,9 +160,35 @@ func publicConfig(cfg Config) map[string]any {
 		"poll_interval_seconds": cfg.PollIntervalSeconds, "confirm_delay_seconds": cfg.ConfirmDelaySeconds,
 		"concurrency": cfg.Concurrency, "auto_reset_enabled": cfg.AutoResetEnabled,
 		"verbose_logging": cfg.VerboseLogging,
+		"update":          normalizeUpdateConfig(cfg.Update),
 		"telegram":        map[string]any{"enabled": cfg.Telegram.Enabled, "bot_token": "", "bot_token_configured": cfg.Telegram.BotToken != "", "chat_id": cfg.Telegram.ChatID, "proxy_url": "", "proxy_url_configured": cfg.Telegram.ProxyURL != "", "allowed_user_ids": cfg.Telegram.AllowedUserIDs},
 		"email":           map[string]any{"enabled": cfg.Email.Enabled, "host": cfg.Email.Host, "port": cfg.Email.Port, "tls_mode": cfg.Email.TLSMode, "username": cfg.Email.Username, "password": "", "password_configured": cfg.Email.Password != "", "from": cfg.Email.From, "recipients": cfg.Email.Recipients},
 	}
+}
+
+func normalizeUpdateConfig(cfg UpdateConfig) UpdateConfig {
+	defaults := defaultUpdateConfig()
+	cfg.WindowStart = strings.TrimSpace(cfg.WindowStart)
+	cfg.WindowEnd = strings.TrimSpace(cfg.WindowEnd)
+	cfg.Timezone = strings.TrimSpace(cfg.Timezone)
+	if cfg.WindowStart == "" {
+		cfg.WindowStart = defaults.WindowStart
+	}
+	if cfg.WindowEnd == "" {
+		cfg.WindowEnd = defaults.WindowEnd
+	}
+	if cfg.Timezone == "" {
+		cfg.Timezone = defaults.Timezone
+	}
+	return cfg
+}
+
+func validUpdateTime(value string) bool {
+	if len(value) != 5 || value[2] != ':' {
+		return false
+	}
+	parsed, err := time.Parse("15:04", value)
+	return err == nil && parsed.Format("15:04") == value
 }
 
 func validateRules(rules []Rule) error {

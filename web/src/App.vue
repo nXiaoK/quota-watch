@@ -22,8 +22,8 @@ const navigation: { id: View; label: string; icon: string; description: string }
 ]
 const view = ref<View>('overview')
 const pageInfo = computed(() => navigation.find((item) => item.id === view.value)!)
-const emptyState: State = { rules: [], observations: {}, events: [], actions: [], deliveries: [], manual_requests: [], telegram_receiver: { status: '', checked_at: '', offset: 0, bot_fingerprint: '' }, health: { last_check_at: '', last_success_at: '', version: '' }, busy: false }
-const emptyConfig: Config = { base_url: '', admin_api_key: '', poll_interval_seconds: 60, confirm_delay_seconds: 5, concurrency: 3, auto_reset_enabled: false, verbose_logging: false, telegram: { enabled: false, bot_token: '', chat_id: '', allowed_user_ids: [], proxy_url: '' }, email: { enabled: false, host: '', port: 587, tls_mode: 'starttls', username: '', password: '', from: '', recipients: [] } }
+const emptyState: State = { rules: [], observations: {}, events: [], actions: [], deliveries: [], manual_requests: [], telegram_receiver: { status: '', checked_at: '', offset: 0, bot_fingerprint: '' }, health: { last_check_at: '', last_success_at: '', version: '' }, update: { status: '' }, busy: false }
+const emptyConfig: Config = { base_url: '', admin_api_key: '', poll_interval_seconds: 60, confirm_delay_seconds: 5, concurrency: 3, auto_reset_enabled: false, verbose_logging: false, update: { idle_enabled: false, scheduled_enabled: false, window_start: '02:00', window_end: '03:00', timezone: 'Asia/Shanghai' }, telegram: { enabled: false, bot_token: '', chat_id: '', allowed_user_ids: [], proxy_url: '' }, email: { enabled: false, host: '', port: 587, tls_mode: 'starttls', username: '', password: '', from: '', recipients: [] } }
 const state = ref<State>(structuredClone(emptyState))
 const config = ref<Config>(structuredClone(emptyConfig))
 const authState = ref<'checking' | 'anonymous' | 'authenticated'>('checking')
@@ -35,6 +35,7 @@ const ready = ref(false)
 const initialLoading = ref(true)
 const stateError = ref('')
 const configError = ref('')
+const updateAcknowledgeError = ref('')
 const notice = ref<{ message: string; error: boolean } | null>(null)
 const pending = ref(new Set<string>())
 const selectedAccounts = ref<number[]>([])
@@ -89,6 +90,7 @@ function leaveSession(message = '') {
   initialLoading.value = false
   stateError.value = ''
   configError.value = ''
+  updateAcknowledgeError.value = ''
   notice.value = null
   pending.value = new Set()
   selectedAccounts.value = []
@@ -164,11 +166,11 @@ async function logout() {
 }
 
 function normalizeState(value: State): State {
-  return { ...value, rules: value.rules ?? [], observations: value.observations ?? {}, events: value.events ?? [], actions: value.actions ?? [], deliveries: value.deliveries ?? [], manual_requests: value.manual_requests ?? [], telegram_receiver: value.telegram_receiver ?? { status: '', checked_at: '', offset: 0, bot_fingerprint: '' }, health: value.health ?? { last_check_at: '', last_success_at: '', version: '' } }
+  return { ...value, rules: value.rules ?? [], observations: value.observations ?? {}, events: value.events ?? [], actions: value.actions ?? [], deliveries: value.deliveries ?? [], manual_requests: value.manual_requests ?? [], telegram_receiver: value.telegram_receiver ?? { status: '', checked_at: '', offset: 0, bot_fingerprint: '' }, health: value.health ?? { last_check_at: '', last_success_at: '', version: '' }, update: value.update ?? { status: '' } }
 }
 
 function acceptConfig(value: Config) {
-  config.value = { ...value, verbose_logging: value.verbose_logging ?? false, admin_api_key: '', telegram: { ...value.telegram, bot_token: '', proxy_url: '', allowed_user_ids: value.telegram.allowed_user_ids ?? [] }, email: { ...value.email, password: '', recipients: value.email.recipients ?? [] } }
+  config.value = { ...value, verbose_logging: value.verbose_logging ?? false, update: { ...emptyConfig.update, ...(value.update ?? {}) }, admin_api_key: '', telegram: { ...value.telegram, bot_token: '', proxy_url: '', allowed_user_ids: value.telegram.allowed_user_ids ?? [] }, email: { ...value.email, password: '', recipients: value.email.recipients ?? [] } }
   ready.value = true
   configError.value = ''
 }
@@ -306,6 +308,34 @@ async function saveConfig(value: Config) {
   })
 }
 
+async function acknowledgeUpdate() {
+  const epoch = sessionEpoch
+  const key = 'update-acknowledge'
+  if (!sessionCurrent(epoch) || pending.value.has(key) || state.value.update.status !== 'unknown') return
+  updateAcknowledgeError.value = ''
+  pending.value.add(key)
+  let acknowledged = false
+  try {
+    await request<{ message?: string }>('/api/update/acknowledge', { method: 'POST' })
+    acknowledged = true
+    if (!sessionCurrent(epoch)) return
+    const sequence = ++stateRequest
+    const result = await request<State>('/api/state')
+    if (!sessionCurrent(epoch)) return
+    if (sequence === stateRequest) {
+      state.value = normalizeState(result)
+      stateError.value = ''
+    }
+  } catch (cause) {
+    if (sessionCurrent(epoch)) {
+      const message = cause instanceof Error ? cause.message : '请稍后重试。'
+      updateAcknowledgeError.value = acknowledged ? `已确认，但刷新状态失败：${message}` : message
+    }
+  } finally {
+    if (sessionCurrent(epoch)) pending.value.delete(key)
+  }
+}
+
 async function testConnection(value: Config) {
   await perform('connection', async (ensureActive) => {
     const result = await request<{ version?: string; message: string }>('/api/connection/test', { method: 'POST', body: value })
@@ -389,7 +419,7 @@ onBeforeUnmount(() => { alive = false; stopPolling(); cancelSessionRequests(); s
             <section class="panel"><div class="panel-heading"><div><h2>已保存规则</h2><p class="muted">{{ enabledRules.length }} 条启用 · {{ state.rules.length - enabledRules.length }} 条停用</p></div><span class="status-pill">任一来源账号触发</span></div><div v-if="state.rules.length" class="rule-list"><article v-for="rule in state.rules" :key="rule.id" class="rule-card" :class="{ disabled: !rule.enabled }"><div class="rule-card-top"><div><h3>{{ rule.name }}</h3><span class="status-pill" :class="{ success: rule.enabled }">{{ rule.enabled ? '监控中' : '已停用' }}</span></div><input class="switch" type="checkbox" role="switch" :checked="rule.enabled" :disabled="pending.has('rules')" :aria-label="`启用规则 ${rule.name}`" @change="toggleRule(rule)" /></div><div class="rule-card-details"><span><UiIcon name="users" :size="15" /> {{ rule.account_ids.length }} 个账号</span><span><UiIcon name="link" :size="15" /> {{ rule.subscription_ids.length }} 条订阅</span><span><UiIcon name="bell" :size="15" /> {{ [rule.notify_telegram && 'Telegram', rule.notify_email && '邮件'].filter(Boolean).join(' + ') || '不发送通知' }}</span></div><div class="rule-card-footer"><span class="caption muted">{{ config.auto_reset_enabled && rule.auto_reset ? `自动重置${maskText(rule)}` : !config.auto_reset_enabled && config.telegram.enabled && rule.notify_telegram && rule.subscription_ids.length && (rule.daily || rule.weekly || rule.monthly) ? `Telegram 手动确认 · ${maskText(rule)}` : '仅检测与通知' }}</span><div><button class="button small secondary" type="button" :disabled="pending.has('rules')" @click="editRule(rule)"><UiIcon name="edit" :size="14" /> 编辑</button><button class="button small ghost" type="button" :disabled="pending.has('rules')" @click="deleteRule(rule)">删除</button></div></div></article></div><div v-else class="empty-state"><UiIcon name="rules" :size="30" /><h3>用一条规则连接账号与订阅</h3><p>选择来源账号、通知渠道和目标订阅。自动重置默认关闭。</p><button class="button primary" type="button" :disabled="!connectionReady" @click="newRule()"><UiIcon name="plus" :size="18" /> 创建第一条规则</button></div></section>
           </div>
           <EventHistory v-if="view === 'history'" :state="state" :retrying="retrying" @retry="retryAction" />
-          <SettingsPanel v-if="ready" v-show="view === 'settings'" :config="config" :receiver="state.telegram_receiver" :saving="pending.has('config')" :testing-connection="pending.has('connection')" :testing-telegram="pending.has('telegram')" :testing-email="pending.has('email')" @save="saveConfig" @test-connection="testConnection" @test-notification="testNotification" />
+          <SettingsPanel v-if="ready" v-show="view === 'settings'" :config="config" :receiver="state.telegram_receiver" :update="state.update" :acknowledging-update="pending.has('update-acknowledge')" :acknowledge-error="updateAcknowledgeError" :saving="pending.has('config')" :testing-connection="pending.has('connection')" :testing-telegram="pending.has('telegram')" :testing-email="pending.has('email')" @save="saveConfig" @test-connection="testConnection" @test-notification="testNotification" @acknowledge-update="acknowledgeUpdate" />
         </template>
         <footer class="workspace-footer"><span>Quota Watch</span><span>账号额度变化 · 通知 · 订阅联动</span></footer>
       </main>

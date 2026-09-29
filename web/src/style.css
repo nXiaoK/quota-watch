@@ -303,6 +303,13 @@ summary { cursor: pointer; font-size: 12px; color: var(--body); min-height: 25px
 .settings-body { padding: 24px; }
 .settings-body > .button { margin-top: 4px; }
 .settings-body > .toggle-row { margin-top: 24px; padding-top: 24px; border-top: 1px dashed var(--border); }
+.settings-body > .toggle-row:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+.update-window { margin-top: 24px; padding-top: 24px; border-top: 1px dashed var(--border); }
+.update-status-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 9px 18px; margin-top: 15px; }
+.update-status-grid p { min-width: 0; overflow-wrap: anywhere; }
+.update-recovery { border-top: 1px dashed var(--border); margin-top: 18px; padding-top: 16px; }
+.update-recovery p { line-height: 1.7; margin-bottom: 12px; }
+.update-recovery .inline-message { margin: 12px 0 0; }
 .settings-save { grid-column: 1/-1; display: flex; justify-content: space-between; align-items: center; gap: 20px; border-top: 1px solid var(--border); padding: 22px 0; }
 .settings-save > span { font-size: 12px; line-height: 1.7; }
 .settings-layout > .inline-message { grid-column: 1/-1; }
@@ -419,6 +426,7 @@ summary { cursor: pointer; font-size: 12px; color: var(--body); min-height: 25px
   .editor-tabs { padding: 0 18px; gap: 22px; }
   .editor-body { padding: 18px; }
   .form-grid, .form-grid.three { grid-template-columns: minmax(0,1fr); gap: 0; }
+  .update-status-grid { grid-template-columns: minmax(0,1fr); }
   .compact-toggle { padding-left: 0; }
   .rule-explainer { gap: 15px; align-items: flex-start; flex-direction: column; }
   .rule-explainer > svg { transform: rotate(90deg); margin-left: 2px; }

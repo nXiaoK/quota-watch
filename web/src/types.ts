@@ -11,6 +11,7 @@ export interface Config {
   concurrency: number
   auto_reset_enabled: boolean
   verbose_logging: boolean
+  update: UpdateConfig
   telegram: {
     enabled: boolean
     bot_token: string
@@ -31,6 +32,25 @@ export interface Config {
     from: string
     recipients: string[]
   }
+}
+
+export interface UpdateConfig {
+  idle_enabled: boolean
+  scheduled_enabled: boolean
+  window_start: string
+  window_end: string
+  timezone: string
+}
+
+export interface UpdateState {
+  status: string
+  current_version?: string
+  latest_version?: string
+  last_check_at?: string
+  last_attempt_at?: string
+  last_success_at?: string
+  last_error?: string
+  last_trigger?: string
 }
 
 export interface Rule {
@@ -199,6 +219,7 @@ export interface State {
     last_error?: string
     version: string
   }
+  update: UpdateState
   busy: boolean
 }
 

@@ -23,6 +23,7 @@ import (
 const (
 	adminReadTimeout    = 30 * time.Second
 	adminResetTimeout   = 150 * time.Second
+	adminUpdateTimeout  = 15 * time.Minute
 	adminResponseLimit  = 8 << 20
 	weeklyWindowMinutes = 7 * 24 * 60
 )
@@ -404,6 +405,16 @@ func (c *AdminClient) ResetSubscriptions(ctx context.Context, ids []int64, mask 
 
 func (c *AdminClient) request(ctx context.Context, method, route string, query url.Values, body any, key string, result any, mutation bool) error {
 	allowed := method == http.MethodGet && body == nil && !mutation && key == "" && (route == "/admin/accounts" || route == "/admin/subscriptions")
+	if method == http.MethodGet && body == nil && !mutation && key == "" {
+		switch route {
+		case "/admin/usage":
+			allowed = query.Encode() == "page=1&page_size=1&sort_by=created_at&sort_order=desc"
+		case "/admin/system/check-updates":
+			allowed = query.Encode() == "force=true"
+		case "/admin/system/version":
+			allowed = len(query) == 0
+		}
+	}
 	if method == http.MethodGet && body == nil && !mutation && key == "" && strings.HasPrefix(route, "/admin/accounts/") {
 		rawID := strings.TrimPrefix(route, "/admin/accounts/")
 		id, err := strconv.ParseInt(rawID, 10, 64)
@@ -412,6 +423,9 @@ func (c *AdminClient) request(ctx context.Context, method, route string, query u
 	if method == http.MethodPost && mutation && route == "/admin/subscriptions/bulk-action" {
 		reset, ok := body.(subscriptionResetRequest)
 		allowed = ok && reset.Action == "reset_quota" && len(reset.SubscriptionIDs) > 0 && len(reset.SubscriptionIDs) <= 100 && (reset.Daily || reset.Weekly || reset.Monthly) && key != ""
+	}
+	if method == http.MethodPost && mutation && (route == "/admin/system/update" || route == "/admin/system/restart") {
+		allowed = body == nil && len(query) == 0 && validSystemOperationKey(key)
 	}
 	if allowed && method == http.MethodGet && route == "/admin/accounts" {
 		cloned := make(url.Values, len(query)+3)
@@ -432,6 +446,9 @@ func (c *AdminClient) request(ctx context.Context, method, route string, query u
 	timeout := adminReadTimeout
 	if mutation {
 		timeout = adminResetTimeout
+	}
+	if route == "/admin/system/update" {
+		timeout = adminUpdateTimeout
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

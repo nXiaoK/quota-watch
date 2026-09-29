@@ -246,7 +246,7 @@ func TestStoredQuotaExpiredResetDoesNotPredictZero(t *testing.T) {
 func TestAdminRequestAllowlistBlocksUpstreamAndOtherActions(t *testing.T) {
 	var visits atomic.Int64
 	client, _ := testAdminClient(t, func(w http.ResponseWriter, r *http.Request) { visits.Add(1); w.WriteHeader(500) })
-	for _, route := range []string{"/admin/openai/accounts/9/quota", "/admin/accounts/9/usage", "/admin/accounts/9/refresh", "/admin/accounts/9/test", "/admin/openai/accounts/9/reset-quota", "/admin/system/version", "/admin/accounts/../settings"} {
+	for _, route := range []string{"/admin/openai/accounts/9/quota", "/admin/accounts/9/usage", "/admin/accounts/9/refresh", "/admin/accounts/9/test", "/admin/openai/accounts/9/reset-quota", "/admin/system/rollback-versions", "/admin/accounts/../settings"} {
 		var result any
 		if err := client.request(context.Background(), http.MethodGet, route, nil, nil, "", &result, false); err == nil {
 			t.Errorf("forbidden route accepted: %s", route)

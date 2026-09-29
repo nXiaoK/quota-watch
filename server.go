@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 //go:embed all:web/dist
@@ -136,6 +137,30 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 			State
 			Busy bool `json:"busy"`
 		}{state, s.engine.IsBusy()})
+	case r.URL.Path == "/api/update/acknowledge" && r.Method == http.MethodPost:
+		cfg, err := s.store.Config()
+		if err != nil {
+			writeError(w, 500, "读取配置失败")
+			return
+		}
+		if err := s.store.UpdateForConfig(cfg, func(state *State) error {
+			if state.Update.Status != "unknown" {
+				return errors.New("当前没有需要人工核对的更新任务")
+			}
+			state.Update.Status = "available"
+			state.Update.LastError = ""
+			state.Update.LastCheckAt = time.Time{}
+			state.Update.HasUpdate = false
+			state.Update.LastAttemptDate = ""
+			state.Update.LastAttemptVersion = ""
+			state.Update.OperationID = ""
+			return nil
+		}); err != nil {
+			writeError(w, 409, err.Error())
+			return
+		}
+		s.logger.Info("管理员已核对并解除自动更新阻塞")
+		writeJSON(w, 200, map[string]string{"message": "已解除阻塞，下次检查将重新确认版本"})
 	case r.URL.Path == "/api/accounts" && r.Method == "GET":
 		client, err := s.client()
 		if err != nil {

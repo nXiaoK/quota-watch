@@ -1,0 +1,520 @@
+package main
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const (
+	updateTickInterval  = time.Minute
+	updateCheckInterval = 6 * time.Hour
+	updateRetryInterval = 15 * time.Minute
+	updateIdlePeriod    = 10 * time.Minute
+	updateVerifyTimeout = 2 * time.Minute
+)
+
+type updateAPI interface {
+	LatestUsage(context.Context) (time.Time, bool, error)
+	CheckUpdates(context.Context) (SystemUpdateInfo, error)
+	PerformSystemUpdate(context.Context, string) (SystemUpdateResult, error)
+	RestartSystem(context.Context, string) error
+	RunningVersion(context.Context) (string, error)
+}
+
+// Updater runs independently of quota sampling. Its long update request holds
+// the engine's busy flag so quota resets cannot race with a service restart.
+type Updater struct {
+	store     *Store
+	engine    *Engine
+	logger    *slog.Logger
+	now       func() time.Time
+	newClient func(Config) (updateAPI, error)
+}
+
+func NewUpdater(store *Store, engine *Engine, logger *slog.Logger) *Updater {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Updater{
+		store: store, engine: engine, logger: logger, now: time.Now,
+		newClient: func(cfg Config) (updateAPI, error) {
+			client, err := NewAdminClient(cfg)
+			if err == nil {
+				client.logger = logger
+				client.logEnabled = store.VerboseLoggingEnabled
+			}
+			return client, err
+		},
+	}
+}
+
+func (u *Updater) Run(ctx context.Context) {
+	ticker := time.NewTicker(updateTickInterval)
+	defer ticker.Stop()
+	for {
+		if err := u.Tick(ctx); err != nil && ctx.Err() == nil {
+			u.logger.Warn("自动更新检查未完成", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (u *Updater) Tick(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	cfg, err := u.store.Config()
+	if err != nil {
+		return err
+	}
+	if !cfg.Update.IdleEnabled && !cfg.Update.ScheduledEnabled {
+		state, err := u.store.Snapshot()
+		if err != nil {
+			return err
+		}
+		if state.Update.Status == "updating" || state.Update.Status == "restarting" || state.Update.Status == "unknown" {
+			client, err := u.newClient(cfg)
+			if err != nil {
+				return err
+			}
+			return u.reconcile(ctx, cfg, client, state.Update, u.now().UTC())
+		}
+		if state.Update.Status != "" {
+			return nil
+		}
+		return u.setUpdateState(cfg, func(state *UpdateState) {
+			state.Status = "disabled"
+		})
+	}
+	client, err := u.newClient(cfg)
+	if err != nil {
+		return u.recordUpdateError(cfg, "failed", err)
+	}
+	state, err := u.store.Snapshot()
+	if err != nil {
+		return err
+	}
+	now := u.now().UTC()
+	if state.Update.Status == "updating" || state.Update.Status == "restarting" || state.Update.Status == "unknown" {
+		return u.reconcile(ctx, cfg, client, state.Update, now)
+	}
+	inside, day, windowStart, err := updateWindow(now, cfg.Update)
+	if err != nil {
+		return u.recordUpdateError(cfg, "failed", err)
+	}
+	checkDue := state.Update.LastCheckAt.IsZero() || now.Sub(state.Update.LastCheckAt) >= updateCheckInterval ||
+		(state.Update.Status == "check_failed" && now.Sub(state.Update.LastCheckAt) >= updateRetryInterval)
+	if inside && state.Update.LastScheduleCheckDate != day &&
+		(state.Update.LastCheckAt.Before(windowStart) || now.Sub(state.Update.LastCheckAt) >= updateRetryInterval) {
+		checkDue = true
+	}
+	if checkDue {
+		if err := u.checkVersion(ctx, cfg, client, now, inside, day); err != nil {
+			return err
+		}
+		state, err = u.store.Snapshot()
+		if err != nil {
+			return err
+		}
+	}
+	if !state.Update.HasUpdate || state.Update.LatestVersion == "" {
+		return nil
+	}
+	if state.Update.LastAttemptVersion == state.Update.LatestVersion && state.Update.LastAttemptDate == day {
+		if state.Update.Status == "failed" {
+			return nil
+		}
+		return u.setUpdateState(cfg, func(s *UpdateState) { s.Status = "already_attempted" })
+	}
+	if !cfg.Update.IdleEnabled && !inside {
+		return u.setUpdateState(cfg, func(s *UpdateState) { s.Status = "available" })
+	}
+	latest, exists, err := client.LatestUsage(ctx)
+	if err != nil {
+		return u.recordUpdateError(cfg, "waiting_idle", fmt.Errorf("读取使用记录失败: %w", err))
+	}
+	idle, err := u.observeIdle(cfg, now, latest, exists)
+	if err != nil || !idle {
+		return err
+	}
+	trigger := "idle"
+	if inside && cfg.Update.ScheduledEnabled {
+		trigger = "scheduled"
+	}
+	return u.perform(ctx, cfg, client, now, day, trigger)
+}
+
+func (u *Updater) checkVersion(ctx context.Context, cfg Config, client updateAPI, now time.Time, inside bool, day string) error {
+	info, err := client.CheckUpdates(ctx)
+	if err != nil {
+		return u.recordCheckError(cfg, now, err)
+	}
+	if info.Warning != "" {
+		return u.recordCheckError(cfg, now, errors.New(info.Warning))
+	}
+	if info.CurrentVersion == "" || info.LatestVersion == "" || info.BuildType != "release" {
+		return u.recordCheckError(cfg, now, errors.New("主站未返回可自动更新的发布版本"))
+	}
+	return u.setUpdateState(cfg, func(s *UpdateState) {
+		s.LastCheckAt = now
+		s.CurrentVersion = info.CurrentVersion
+		s.LatestVersion = info.LatestVersion
+		s.HasUpdate = info.HasUpdate
+		s.EmptySince = time.Time{}
+		s.LastError = ""
+		if inside {
+			s.LastScheduleCheckDate = day
+		}
+		if info.HasUpdate {
+			s.Status = "available"
+		} else {
+			s.Status = "up_to_date"
+		}
+	})
+}
+
+func (u *Updater) observeIdle(cfg Config, now, latest time.Time, exists bool) (bool, error) {
+	state, err := u.store.Snapshot()
+	if err != nil {
+		return false, err
+	}
+	firstEmpty := state.Update.EmptySince
+	if exists {
+		firstEmpty = time.Time{}
+	}
+	if !exists && firstEmpty.IsZero() {
+		firstEmpty = now
+	}
+	idle := exists && !latest.After(now.Add(-updateIdlePeriod)) || !exists && now.Sub(firstEmpty) >= updateIdlePeriod
+	err = u.setUpdateState(cfg, func(s *UpdateState) {
+		s.EmptySince = firstEmpty
+		s.LastError = ""
+		if !idle {
+			s.Status = "waiting_idle"
+		}
+	})
+	return idle, err
+}
+
+func (u *Updater) perform(ctx context.Context, cfg Config, client updateAPI, now time.Time, day, trigger string) error {
+	if !u.engine.busy.CompareAndSwap(false, true) {
+		return nil
+	}
+	defer u.engine.busy.Store(false)
+	current, err := u.store.Config()
+	if err != nil {
+		return err
+	}
+	if current.BaseURL != cfg.BaseURL || current.AdminAPIKey != cfg.AdminAPIKey || current.Update != cfg.Update {
+		return nil
+	}
+	// A slow version or usage query can cross the end of the scheduled window.
+	// When idle mode is disabled, do not begin a late update.
+	if !cfg.Update.IdleEnabled {
+		inside, _, _, err := updateWindow(u.now().UTC(), cfg.Update)
+		if err != nil {
+			return err
+		}
+		if !inside {
+			return nil
+		}
+	}
+	if trigger == "scheduled" && cfg.Update.IdleEnabled {
+		inside, _, _, err := updateWindow(u.now().UTC(), cfg.Update)
+		if err != nil {
+			return err
+		}
+		if !inside {
+			trigger = "idle"
+		}
+	}
+	latest, exists, err := client.LatestUsage(ctx)
+	if err != nil {
+		return u.recordUpdateError(cfg, "waiting_idle", fmt.Errorf("更新前复查使用记录失败: %w", err))
+	}
+	idle, err := u.observeIdle(cfg, u.now().UTC(), latest, exists)
+	if err != nil || !idle {
+		return err
+	}
+	if !cfg.Update.IdleEnabled {
+		inside, _, _, err := updateWindow(u.now().UTC(), cfg.Update)
+		if err != nil {
+			return err
+		}
+		if !inside {
+			return nil
+		}
+	} else if trigger == "scheduled" {
+		inside, _, _, err := updateWindow(u.now().UTC(), cfg.Update)
+		if err != nil {
+			return err
+		}
+		if !inside {
+			trigger = "idle"
+		}
+	}
+	state, err := u.store.Snapshot()
+	if err != nil {
+		return err
+	}
+	if !state.Update.HasUpdate || state.Update.LatestVersion == "" {
+		return nil
+	}
+	now = u.now().UTC()
+	_, day, _, err = updateWindow(now, cfg.Update)
+	if err != nil {
+		return err
+	}
+	opID, err := randomUpdateID()
+	if err != nil {
+		return err
+	}
+	previousUpdate := state.Update
+	if err := u.setUpdateState(cfg, func(s *UpdateState) {
+		s.Status = "updating"
+		s.LastAttemptAt = now
+		s.LastAttemptDate = day
+		s.LastAttemptVersion = s.LatestVersion
+		s.LastTrigger = trigger
+		s.LastError = ""
+		s.OperationID = opID
+	}); err != nil {
+		return err
+	}
+	restoreAttempt := func() error {
+		return u.store.Update(func(state *State) error {
+			if state.Update.Status == "updating" && state.Update.OperationID == opID {
+				state.Update = previousUpdate
+			}
+			return nil
+		})
+	}
+	current, err = u.store.Config()
+	if err != nil {
+		return errors.Join(err, restoreAttempt())
+	}
+	if current.BaseURL != cfg.BaseURL || current.AdminAPIKey != cfg.AdminAPIKey || current.Update != cfg.Update {
+		return restoreAttempt()
+	}
+	// Persisting the attempt can cross the end of the scheduled window.
+	// Check once more immediately before sending the update request.
+	if !cfg.Update.IdleEnabled {
+		inside, _, _, err := updateWindow(u.now().UTC(), cfg.Update)
+		if err != nil || !inside {
+			return errors.Join(err, restoreAttempt())
+		}
+	}
+	u.logger.Info("Sub2API 自动更新开始", "trigger", trigger, "target_version", state.Update.LatestVersion)
+	result, err := client.PerformSystemUpdate(ctx, opID+"-update")
+	if err != nil {
+		return u.recordUpdateError(cfg, mutationOutcome(err), err)
+	}
+	if result.AlreadyUpToDate {
+		return u.setUpdateState(cfg, func(s *UpdateState) {
+			s.Status = "up_to_date"
+			s.HasUpdate = false
+			s.LastError = ""
+		})
+	}
+	if !result.NeedRestart {
+		return u.recordUpdateError(cfg, "unknown", errors.New("更新接口未确认需要重启，请在 Sub2API 核对版本"))
+	}
+	if err := u.setUpdateState(cfg, func(s *UpdateState) { s.Status = "restarting" }); err != nil {
+		return err
+	}
+	restartErr := client.RestartSystem(ctx, opID+"-restart")
+	if restartErr != nil {
+		u.logger.Warn("Sub2API 重启响应异常，等待版本核对", "error", restartErr)
+	}
+	verified, verifyErr := u.verifyRestart(ctx, client, state.Update.CurrentVersion, state.Update.LatestVersion)
+	if verified != "" {
+		return u.markSuccess(cfg, verified, u.now().UTC())
+	}
+	if restartErr != nil {
+		return u.recordUpdateError(cfg, mutationOutcome(restartErr), restartErr)
+	}
+	if verifyErr != nil && errors.Is(verifyErr, context.Canceled) {
+		return verifyErr
+	}
+	return u.recordUpdateError(cfg, "unknown", errors.New("重启后未能确认新版本，请在 Sub2API 核对运行版本"))
+}
+
+func (u *Updater) verifyRestart(ctx context.Context, client updateAPI, oldVersion, targetVersion string) (string, error) {
+	verifyCtx, cancel := context.WithTimeout(ctx, updateVerifyTimeout)
+	defer cancel()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-verifyCtx.Done():
+			return "", verifyCtx.Err()
+		case <-ticker.C:
+			version, err := client.RunningVersion(verifyCtx)
+			// PerformUpdate fetches the latest release again, so it may install a
+			// version newer than the one found by our earlier availability check.
+			if err == nil && version != "" && version != oldVersion && versionAtLeast(version, targetVersion) {
+				return version, nil
+			}
+		}
+	}
+}
+
+func (u *Updater) reconcile(ctx context.Context, cfg Config, client updateAPI, state UpdateState, now time.Time) error {
+	version, err := client.RunningVersion(ctx)
+	if err == nil && version != "" && version != state.CurrentVersion && versionAtLeast(version, state.LastAttemptVersion) {
+		return u.markSuccess(cfg, version, now)
+	}
+	if state.Status == "unknown" {
+		return nil
+	}
+	if now.Sub(state.LastAttemptAt) < 20*time.Minute {
+		return nil
+	}
+	return u.recordUpdateError(cfg, "unknown", errors.New("自动更新结果未知，请在 Sub2API 核对运行版本"))
+}
+
+// Sub2API release versions are numeric dotted versions. Exact equality also
+// supports nonstandard version strings, while an unparseable different string
+// cannot verify that the requested release was installed.
+func versionAtLeast(actual, target string) bool {
+	if actual == target && actual != "" {
+		return true
+	}
+	parse := func(value string) ([]int, bool) {
+		value = strings.TrimPrefix(value, "v")
+		parts := strings.Split(value, ".")
+		if len(parts) == 0 {
+			return nil, false
+		}
+		numbers := make([]int, len(parts))
+		for i, part := range parts {
+			if part == "" {
+				return nil, false
+			}
+			number, err := strconv.Atoi(part)
+			if err != nil || number < 0 {
+				return nil, false
+			}
+			numbers[i] = number
+		}
+		return numbers, true
+	}
+	a, okA := parse(actual)
+	b, okB := parse(target)
+	if !okA || !okB {
+		return false
+	}
+	for i := 0; i < len(a) || i < len(b); i++ {
+		var current, expected int
+		if i < len(a) {
+			current = a[i]
+		}
+		if i < len(b) {
+			expected = b[i]
+		}
+		if current != expected {
+			return current > expected
+		}
+	}
+	return true
+}
+
+func (u *Updater) markSuccess(cfg Config, version string, now time.Time) error {
+	u.logger.Info("Sub2API 自动更新完成", "version", version)
+	return u.setUpdateState(cfg, func(s *UpdateState) {
+		s.Status = "success"
+		s.CurrentVersion = version
+		s.LatestVersion = version
+		s.HasUpdate = false
+		s.LastSuccessAt = now
+		s.LastError = ""
+	})
+}
+
+func (u *Updater) recordUpdateError(cfg Config, status string, err error) error {
+	if err == nil {
+		return nil
+	}
+	u.logger.Warn("Sub2API 自动更新状态", "status", status, "error", err)
+	storeErr := u.setUpdateState(cfg, func(s *UpdateState) {
+		s.Status = status
+		s.LastError = err.Error()
+	})
+	return errors.Join(err, storeErr)
+}
+
+func (u *Updater) recordCheckError(cfg Config, now time.Time, err error) error {
+	u.logger.Warn("Sub2API 自动更新状态", "status", "check_failed", "error", err)
+	storeErr := u.setUpdateState(cfg, func(s *UpdateState) {
+		s.Status = "check_failed"
+		s.LastCheckAt = now
+		s.HasUpdate = false
+		s.EmptySince = time.Time{}
+		s.LastError = err.Error()
+	})
+	return errors.Join(err, storeErr)
+}
+
+func (u *Updater) setUpdateState(cfg Config, change func(*UpdateState)) error {
+	return u.store.UpdateForConfig(cfg, func(state *State) error {
+		change(&state.Update)
+		return nil
+	})
+}
+
+func mutationOutcome(err error) string {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.Unknown {
+		return "unknown"
+	}
+	return "failed"
+}
+
+func randomUpdateID() (string, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	return "quota-watch-" + hex.EncodeToString(raw[:]), nil
+}
+
+func updateWindow(now time.Time, cfg UpdateConfig) (bool, string, time.Time, error) {
+	location, err := time.LoadLocation(cfg.Timezone)
+	if err != nil {
+		return false, "", time.Time{}, err
+	}
+	local := now.In(location)
+	day := local.Format("2006-01-02")
+	startClock, err := time.Parse("15:04", cfg.WindowStart)
+	if err != nil {
+		return false, "", time.Time{}, err
+	}
+	endClock, err := time.Parse("15:04", cfg.WindowEnd)
+	if err != nil {
+		return false, "", time.Time{}, err
+	}
+	start := time.Date(local.Year(), local.Month(), local.Day(), startClock.Hour(), startClock.Minute(), 0, 0, location)
+	end := time.Date(local.Year(), local.Month(), local.Day(), endClock.Hour(), endClock.Minute(), 0, 0, location)
+	// A wall-clock time may not exist on a daylight-saving transition day.
+	// Skip that day's scheduled window instead of shifting it to another hour.
+	if !sameLocalClock(start, local, startClock) || !sameLocalClock(end, local, endClock) {
+		return false, day, time.Time{}, nil
+	}
+	return cfg.ScheduledEnabled && !local.Before(start) && local.Before(end), day, start.UTC(), nil
+}
+
+func sameLocalClock(candidate, day, clock time.Time) bool {
+	return candidate.Year() == day.Year() && candidate.Month() == day.Month() && candidate.Day() == day.Day() &&
+		candidate.Hour() == clock.Hour() && candidate.Minute() == clock.Minute()
+}

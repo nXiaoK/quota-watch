@@ -166,6 +166,7 @@ func (s *Store) configLocked() (Config, error) {
 	if err := json.Unmarshal(plain, &cfg); err != nil {
 		return Config{}, fmt.Errorf("读取配置: %w", err)
 	}
+	cfg.Update = normalizeUpdateConfig(cfg.Update)
 	return cfg, nil
 }
 
@@ -319,6 +320,7 @@ func (s *Store) SaveConfig(cfg Config) error {
 		}
 		state.Observations = map[string]Observation{}
 		state.Health = Health{}
+		state.Update = UpdateState{}
 		normalizeState(&state)
 		for i := range state.Rules {
 			state.Rules[i].Enabled = false

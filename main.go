@@ -38,11 +38,14 @@ func run() error {
 	defer cancel()
 	logger := slog.Default()
 	engine := NewEngine(store, logger)
+	updater := NewUpdater(store, engine, logger)
 	telegramReceiver := NewTelegramReceiver(store, engine, logger)
 	panel := NewServer(ctx, store, engine, logger, username, password)
 	httpServer := &http.Server{Addr: *listen, Handler: panel.Handler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 3 * time.Minute, IdleTimeout: 60 * time.Second}
 	engineDone := make(chan struct{})
 	go func() { defer close(engineDone); engine.Run(ctx) }()
+	updaterDone := make(chan struct{})
+	go func() { defer close(updaterDone); updater.Run(ctx) }()
 	telegramDone := make(chan struct{})
 	go func() { defer close(telegramDone); telegramReceiver.Run(ctx) }()
 	serverDone := make(chan error, 1)
@@ -52,6 +55,7 @@ func run() error {
 	case err := <-serverDone:
 		cancel()
 		<-engineDone
+		<-updaterDone
 		<-telegramDone
 		panel.jobs.Wait()
 		if !errors.Is(err, http.ErrServerClosed) {
@@ -65,6 +69,7 @@ func run() error {
 			logger.Warn("HTTP 关闭超时")
 		}
 		<-engineDone
+		<-updaterDone
 		<-telegramDone
 		panel.jobs.Wait()
 	}
