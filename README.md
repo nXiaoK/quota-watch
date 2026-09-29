@@ -37,19 +37,21 @@ Telegram/SMTP 通知会访问你配置的通知渠道。主站自身原有业务
 
 ## Docker Compose
 
-首次部署，从独立仓库克隆并在仓库根目录执行：
+首次部署需要 Git、Docker Compose v2、OpenSSL 和构建镜像所需的网络访问。克隆独立仓库后，在仓库根目录执行：
 
 ```sh
 git clone https://github.com/nXiaoK/quota-watch.git
 cd quota-watch
-cp .env.example .env
-# 编辑 .env，设置 QUOTA_WATCH_PASSWORD；可用 openssl rand -base64 24 生成登录密码。
-docker compose up -d --build quota-watch
+./install.sh
 ```
 
-**已有 Docker 部署请先参阅 [生产环境更新步骤](UPDATING.md)**，保留原数据卷、`.env`、密钥及网络配置后再启动。直接换目录运行 Compose 可能使用新的空数据卷；不要用 `.env.example` 覆盖已有 `.env`。
+安装脚本会随机生成管理页用户名、用 `openssl rand -base64 24` 生成密码，并生成 32 字节随机主密钥的标准 Base64 编码；凭据保存在权限为 `0600` 的 `.env`。安装成功后，终端仅展示用户名和密码这两项登录凭据，不展示主密钥。请妥善保存 `.env`，以后升级和恢复数据都需要沿用原主密钥。
 
-打开 `http://127.0.0.1:8091`，在登录页使用 `.env` 中的用户名和密码登录。登录页及工作台都可以切换浅色/深色主题。默认仅映射本机端口；远程访问可使用 SSH 隧道：
+若首次构建或健康检查失败，脚本会保留已生成的 `.env`。排查 Docker 日志后，在同一目录运行 `./install.sh --resume`，复用原凭据继续安装；不要删除 `.env` 重新生成密钥。
+
+**已有 `.env` 或 Docker 部署时不要重新运行安装脚本。**已有本仓库 Docker Compose 部署，在原部署目录运行 `./update.sh`；更新脚本另需 Python 3。它会核对原容器的凭据和 `/data` 挂载；使用额外挂载、Compose `env_file`、`secrets` 或 `configs` 的部署，请按 [生产环境更新步骤](UPDATING.md)中的手动流程核对。更新必须沿用原 Compose project、配置和数据卷；直接换目录启动可能挂载新的空数据卷，也不要用 `.env.example` 覆盖已有 `.env`。
+
+打开 `http://127.0.0.1:8091`，在登录页使用安装完成时显示的用户名和密码登录。登录页及工作台都可以切换浅色/深色主题。默认仅映射本机端口；远程访问可使用 SSH 隧道：
 
 ```sh
 ssh -L 8091:127.0.0.1:8091 user@server
@@ -59,7 +61,7 @@ ssh -L 8091:127.0.0.1:8091 user@server
 
 登录使用服务端会话和 HttpOnly、SameSite=Strict Cookie，绝对有效期为 12 小时；退出登录会立即使该会话失效，重启服务后需重新登录。用户名和密码仍由 `QUOTA_WATCH_USERNAME` / `QUOTA_WATCH_PASSWORD` 配置，不再使用浏览器 Basic 认证弹框。浏览器只保存主题偏好，不在 localStorage 中保存凭据或会话令牌。
 
-连接设置中的主站 URL 填 Sub2API 可访问地址，管理员 Key 使用主站已有管理员 API Key。容器内的 `127.0.0.1` 指当前容器；同一 Docker 网络可用主站服务名，例如 `http://sub2api:8080`，并将服务加入该网络。
+连接设置中的主站 URL 填 Sub2API 可访问地址，管理员 Key 使用主站已有管理员 API Key。安装脚本不会自动配置 Quota Watch 与 Sub2API 的容器网络。容器内的 `127.0.0.1` 指当前容器；同一 Docker 网络可用主站服务名，例如 `http://sub2api:8080`，并将服务加入该网络。
 
 主站管理员 Key 是管理权限凭据。新服务不会自动重新生成主站 Key。主站原有认证、合规确认及面板限流仍适用；连接测试会展示失败原因。
 
@@ -179,7 +181,7 @@ QUOTA_WATCH_PASSWORD='替换为登录密码' ./quota-watch
 | `QUOTA_WATCH_DATA_DIR` | `./data` |
 | `QUOTA_WATCH_USERNAME` | `admin` |
 | `QUOTA_WATCH_PASSWORD` | 管理页登录密码，启动时必须提供 |
-| `QUOTA_WATCH_MASTER_KEY` | 可选，32 字节密钥的 Base64；未设置时在数据目录生成 `master.key` |
+| `QUOTA_WATCH_MASTER_KEY` | 可选，32 字节密钥的标准 Base64；`install.sh` 会生成并保存在 `.env`，手动部署未设置时在数据目录生成 `master.key` |
 
 Linux systemd 模板见 `quota-watch.service`。创建专用用户，将二进制放在 `/opt/quota-watch`，将环境变量写入仅该服务可读的 `/etc/quota-watch.env`，安装服务后启动。
 
@@ -187,7 +189,7 @@ Linux systemd 模板见 `quota-watch.service`。创建专用用户，将二进�
 
 停止服务后备份整个数据目录，包含 `quota-watch.db`、可能存在的 WAL 文件与 `master.key`。使用环境变量密钥时也必须另行备份该密钥。恢复时保持原密钥，不能通过新生成密钥恢复旧加密配置。
 
-Docker 部署的源码更新、保留旧数据、备份、验收及回滚命令见 [生产环境更新步骤](UPDATING.md)。后续新功能仍使用同一套更新流程；仅重启容器不会更新程序。
+本仓库 Docker Compose 部署在原部署目录运行 `./update.sh` 更新源码、备份旧镜像文件与完整数据并重建容器；新容器未通过检查时，脚本会尝试从备份恢复旧服务。手动迁移、自动恢复后的核对及回滚步骤见 [生产环境更新步骤](UPDATING.md)。仅重启容器不会更新程序。
 
 升级后先测试主站连接和模拟规则。主站实际部署必须在账号详情中暴露已有 Codex 快照字段，并支持订阅 bulk-action API；接口缺失或字段不兼容时等待数据，不会将数据补成零或主动查询上游。
 
