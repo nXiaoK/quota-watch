@@ -216,7 +216,7 @@ func (u *Updater) perform(ctx context.Context, cfg Config, client updateAPI, now
 	if err != nil {
 		return err
 	}
-	if current.BaseURL != cfg.BaseURL || current.AdminAPIKey != cfg.AdminAPIKey || current.Update != cfg.Update {
+	if current.BaseURL != cfg.BaseURL || current.AdminAPIKey != cfg.AdminAPIKey || !sameUpdateTriggerSettings(current.Update, cfg.Update) {
 		return nil
 	}
 	// A slow version or usage query can cross the end of the scheduled window.
@@ -304,7 +304,7 @@ func (u *Updater) perform(ctx context.Context, cfg Config, client updateAPI, now
 	if err != nil {
 		return errors.Join(err, restoreAttempt())
 	}
-	if current.BaseURL != cfg.BaseURL || current.AdminAPIKey != cfg.AdminAPIKey || current.Update != cfg.Update {
+	if current.BaseURL != cfg.BaseURL || current.AdminAPIKey != cfg.AdminAPIKey || !sameUpdateTriggerSettings(current.Update, cfg.Update) {
 		return restoreAttempt()
 	}
 	// Persisting the attempt can cross the end of the scheduled window.
@@ -431,15 +431,74 @@ func versionAtLeast(actual, target string) bool {
 }
 
 func (u *Updater) markSuccess(cfg Config, version string, now time.Time) error {
-	u.logger.Info("Sub2API 自动更新完成", "version", version)
-	return u.setUpdateState(cfg, func(s *UpdateState) {
+	err := u.store.UpdateForConfigWithCurrent(cfg, func(state *State, current Config) error {
+		s := &state.Update
+		if s.Status == "success" && s.CurrentVersion == version {
+			return nil
+		}
+		previousVersion := s.CurrentVersion
+		trigger := s.LastTrigger
+		operationID := s.OperationID
 		s.Status = "success"
 		s.CurrentVersion = version
 		s.LatestVersion = version
 		s.HasUpdate = false
 		s.LastSuccessAt = now
 		s.LastError = ""
+		if operationID == "" {
+			return nil
+		}
+		message := updateSuccessMessage(previousVersion, version, trigger, now, current.Update.Timezone)
+		if current.Update.NotifyTelegramEnabled && current.Telegram.Enabled {
+			queueUpdateSuccessDelivery(state, operationID, "telegram", message, now)
+		}
+		if current.Update.NotifyEmailEnabled && current.Email.Enabled {
+			queueUpdateSuccessDelivery(state, operationID, "email", message, now)
+		}
+		return nil
 	})
+	if err == nil {
+		u.logger.Info("Sub2API 自动更新完成", "version", version)
+	}
+	return err
+}
+
+func queueUpdateSuccessDelivery(state *State, operationID, channel, message string, now time.Time) {
+	id := "sub2api-update-" + operationID + "-" + channel
+	for _, item := range state.Deliveries {
+		if item.ID == id {
+			return
+		}
+	}
+	state.Deliveries = append(state.Deliveries, Delivery{
+		ID: id, Kind: "update_success", Channel: channel, Message: message,
+		Status: "pending", NextAttemptAt: now, CreatedAt: now, UpdatedAt: now,
+	})
+}
+
+func updateSuccessMessage(previousVersion, version, trigger string, at time.Time, timezone string) string {
+	location, err := time.LoadLocation(timezone)
+	if err != nil {
+		location = time.UTC
+		timezone = "UTC"
+	}
+	method := "自动更新"
+	switch trigger {
+	case "idle":
+		method = "空闲触发"
+	case "scheduled":
+		method = "定时触发"
+	}
+	message := "Sub2API 自动更新成功\n当前版本：" + version
+	if previousVersion != "" && previousVersion != version {
+		message += "\n原版本：" + previousVersion
+	}
+	return message + "\n触发方式：" + method + "\n完成时间：" + at.In(location).Format("2006-01-02 15:04:05") + "（" + timezone + "）"
+}
+
+func sameUpdateTriggerSettings(a, b UpdateConfig) bool {
+	return a.IdleEnabled == b.IdleEnabled && a.ScheduledEnabled == b.ScheduledEnabled &&
+		a.WindowStart == b.WindowStart && a.WindowEnd == b.WindowEnd && a.Timezone == b.Timezone
 }
 
 func (u *Updater) recordUpdateError(cfg Config, status string, err error) error {

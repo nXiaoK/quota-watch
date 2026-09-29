@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -263,6 +264,28 @@ func TestSMTPVerifiedTLSAndUTF8MIME(t *testing.T) {
 				t.Fatalf("email body changed: %q %v", decoded, err)
 			}
 		})
+	}
+}
+
+func TestSMTPUpdateSuccessUsesDistinctSubject(t *testing.T) {
+	cfg, tlsConfig, observations := localSMTPServer(t, "tls", true, false)
+	if err := sendEmailWithTLSConfigAndSubject(context.Background(), cfg, updateEmailSubject, "Sub2API 自动更新成功", tlsConfig); err != nil {
+		t.Fatal(err)
+	}
+	observed := <-observations
+	if observed.Error != nil {
+		t.Fatal(observed.Error)
+	}
+	parsed, err := mail.ReadMessage(strings.NewReader(observed.Data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	subject, err := new(mime.WordDecoder).DecodeHeader(parsed.Header.Get("Subject"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if subject != "Sub2API 自动更新成功" || subject == quotaEmailSubject {
+		t.Fatalf("update notification used wrong email subject: %q", subject)
 	}
 }
 

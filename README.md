@@ -82,6 +82,8 @@ ssh -L 8091:127.0.0.1:8091 user@server
 
 更新沿用 Sub2API 后台的管理员 API：先请求 `GET /api/v1/admin/system/check-updates?force=true`，有可用更新时请求 `POST /api/v1/admin/system/update`。只有更新成功且响应要求重启时，才请求 `POST /api/v1/admin/system/restart`，随后确认服务恢复及运行版本。自动更新只适用于 Sub2API 标记为 `release` 的构建。`timezone` 是本服务用于计算时间窗的配置，不是 Sub2API 更新检查接口的参数。更新期间 Sub2API 会短暂不可用；其 Compose 服务需设置 `restart: unless-stopped` 或 `restart: always`，使进程正常退出后也能重新启动。
 
+需要获知更新结果时，可分别开启“更新成功后通知 Telegram”和“更新成功后通知邮件”；两个通知开关默认关闭，并沿用下方各通道已启用的 Bot/Chat ID 或 SMTP 配置。只有完成更新、重启并确认运行版本已升级后，才会将成功通知加入持久化队列；更新失败、结果未知或已经是最新版本都不会发送成功通知。通知发送失败会按现有退避机制重试，发送结果可在“事件历史 → 通知记录”查看，不影响已确认的更新成功状态。
+
 若更新请求中断或 Quota Watch 在更新期间重启，结果无法确认时会停止后续自动尝试。请先在 Sub2API 核对运行版本；必要时从其后台手动重启。确认状态后，可在 Quota Watch 设置页点击“已核对，允许再次自动尝试”解除阻塞。明确失败的任务当天不会自动重复提交。
 
 **Docker Compose 部署注意**：这一方式替换的是当前容器内的 Sub2API 可执行文件，不会更新 Docker 镜像。以后执行 `docker compose up --force-recreate`、重新部署或重建容器时，仍可能从旧镜像恢复到旧版本；请另行维护 Compose 所用镜像版本。

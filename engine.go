@@ -32,6 +32,7 @@ type Engine struct {
 	verboseLogging    atomic.Bool
 	NewAdmin          func(Config) (AdminAPI, error)
 	Notify            func(context.Context, Config, string, string) error
+	NotifyUpdate      func(context.Context, Config, string, string) error
 	NotifyInteractive func(context.Context, Config, Delivery) error
 	Now               func() time.Time
 	wait              func(context.Context, time.Duration) error
@@ -48,7 +49,7 @@ func newEngine(store engineStore, logger *slog.Logger) *Engine {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	return &Engine{
-		store: store, logger: logger, Now: time.Now, Notify: SendNotification, NotifyInteractive: SendInteractiveNotification,
+		store: store, logger: logger, Now: time.Now, Notify: SendNotification, NotifyUpdate: SendUpdateNotification, NotifyInteractive: SendInteractiveNotification,
 		NewAdmin: func(cfg Config) (AdminAPI, error) {
 			client, err := NewAdminClient(cfg)
 			if err != nil {
@@ -1253,6 +1254,10 @@ func (e *Engine) sendDelivery(ctx context.Context, original Delivery) error {
 		return err
 	}
 	enabled := (original.Channel == "telegram" && cfg.Telegram.Enabled) || (original.Channel == "email" && cfg.Email.Enabled)
+	if original.Kind == "update_success" {
+		enabled = enabled && ((original.Channel == "telegram" && cfg.Update.NotifyTelegramEnabled) ||
+			(original.Channel == "email" && cfg.Update.NotifyEmailEnabled))
+	}
 	claimed := false
 	attempts := 0
 	update := e.store.Update
@@ -1266,7 +1271,11 @@ func (e *Engine) sendDelivery(ctx context.Context, original Delivery) error {
 				continue
 			}
 			if !enabled {
-				item.Status, item.LastError, item.UpdatedAt = "skipped", "通知渠道已关闭", e.Now()
+				reason := "通知渠道已关闭"
+				if item.Kind == "update_success" {
+					reason = "更新成功通知或通知渠道已关闭"
+				}
+				item.Status, item.LastError, item.UpdatedAt = "skipped", reason, e.Now()
 				return nil
 			}
 			if item.ManualRequestID != "" {
@@ -1302,6 +1311,8 @@ func (e *Engine) sendDelivery(ctx context.Context, original Delivery) error {
 	var sendErr error
 	if original.ManualRequestID != "" && original.Channel == "telegram" {
 		sendErr = e.NotifyInteractive(ctx, cfg, original)
+	} else if original.Kind == "update_success" {
+		sendErr = e.NotifyUpdate(ctx, cfg, original.Channel, original.Message)
 	} else {
 		sendErr = e.Notify(ctx, cfg, original.Channel, original.Message)
 	}

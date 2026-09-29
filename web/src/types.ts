@@ -37,6 +37,8 @@ export interface Config {
 export interface UpdateConfig {
   idle_enabled: boolean
   scheduled_enabled: boolean
+  notify_telegram_enabled: boolean
+  notify_email_enabled: boolean
   window_start: string
   window_end: string
   timezone: string

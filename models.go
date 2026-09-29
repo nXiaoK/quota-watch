@@ -20,11 +20,13 @@ type Config struct {
 }
 
 type UpdateConfig struct {
-	IdleEnabled      bool   `json:"idle_enabled"`
-	ScheduledEnabled bool   `json:"scheduled_enabled"`
-	WindowStart      string `json:"window_start"`
-	WindowEnd        string `json:"window_end"`
-	Timezone         string `json:"timezone"`
+	IdleEnabled           bool   `json:"idle_enabled"`
+	ScheduledEnabled      bool   `json:"scheduled_enabled"`
+	NotifyTelegramEnabled bool   `json:"notify_telegram_enabled"`
+	NotifyEmailEnabled    bool   `json:"notify_email_enabled"`
+	WindowStart           string `json:"window_start"`
+	WindowEnd             string `json:"window_end"`
+	Timezone              string `json:"timezone"`
 }
 
 func defaultUpdateConfig() UpdateConfig {
@@ -207,6 +209,7 @@ type Action struct {
 
 type Delivery struct {
 	ManualRequestID string    `json:"manual_request_id,omitempty"`
+	Kind            string    `json:"kind,omitempty"`
 	ID              string    `json:"id"`
 	EventID         string    `json:"event_id"`
 	Channel         string    `json:"channel"`

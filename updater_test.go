@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -93,6 +94,190 @@ func TestUpdaterIdleUpdateAndRestartOnlyOnce(t *testing.T) {
 	}
 	if err := u.Tick(context.Background()); err != nil || fake.updates != 1 {
 		t.Fatalf("successful update repeated: %v calls=%d", err, fake.updates)
+	}
+}
+
+func TestUpdaterSuccessQueuesOnlyEnabledChannelsOnce(t *testing.T) {
+	now := time.Date(2026, 9, 29, 4, 0, 0, 0, time.UTC)
+	for _, tt := range []struct {
+		name            string
+		notifyTelegram  bool
+		notifyEmail     bool
+		telegramEnabled bool
+		emailEnabled    bool
+		want            []string
+	}{
+		{"both", true, true, true, true, []string{"telegram", "email"}},
+		{"telegram only", true, false, true, true, []string{"telegram"}},
+		{"email only", false, true, true, true, []string{"email"}},
+		{"telegram channel disabled", true, true, false, true, []string{"email"}},
+		{"email channel disabled", true, true, true, false, []string{"telegram"}},
+		{"notifications disabled", false, false, true, true, nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			settings := defaultUpdateConfig()
+			settings.NotifyTelegramEnabled = tt.notifyTelegram
+			settings.NotifyEmailEnabled = tt.notifyEmail
+			u, store := newTestUpdater(t, settings, now, &fakeUpdateAPI{})
+			cfg, err := store.Config()
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg.Telegram.Enabled = tt.telegramEnabled
+			cfg.Email.Enabled = tt.emailEnabled
+			if err := store.SaveConfig(cfg); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Update(func(state *State) error {
+				state.Update = UpdateState{Status: "restarting", CurrentVersion: "1.2.3", LatestVersion: "1.2.4", HasUpdate: true,
+					LastAttemptVersion: "1.2.4", LastTrigger: "idle", OperationID: "operation-1", LastAttemptAt: now.Add(-time.Minute)}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := u.markSuccess(cfg, "1.2.4", now); err != nil {
+				t.Fatal(err)
+			}
+			if err := u.markSuccess(cfg, "1.2.4", now.Add(time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+			state, err := store.Snapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state.Update.Status != "success" || state.Update.CurrentVersion != "1.2.4" || !state.Update.LastSuccessAt.Equal(now) {
+				t.Fatalf("success state changed on repeated confirmation: %+v", state.Update)
+			}
+			if len(state.Deliveries) != len(tt.want) {
+				t.Fatalf("queued %d notifications, want %d: %+v", len(state.Deliveries), len(tt.want), state.Deliveries)
+			}
+			for i, delivery := range state.Deliveries {
+				if delivery.ID != "sub2api-update-operation-1-"+tt.want[i] || delivery.Kind != "update_success" ||
+					delivery.Channel != tt.want[i] || delivery.Status != "pending" ||
+					!strings.Contains(delivery.Message, "1.2.3") || !strings.Contains(delivery.Message, "1.2.4") {
+					t.Fatalf("unexpected update delivery: %+v", delivery)
+				}
+			}
+		})
+	}
+}
+
+func TestUpdaterReconcileQueuesSuccessAfterVersionConfirmation(t *testing.T) {
+	now := time.Date(2026, 9, 29, 4, 0, 0, 0, time.UTC)
+	settings := defaultUpdateConfig()
+	settings.IdleEnabled = true
+	settings.NotifyTelegramEnabled = true
+	u, store := newTestUpdater(t, settings, now, &fakeUpdateAPI{version: "1.2.4"})
+	cfg, err := store.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Telegram.Enabled = true
+	if err := store.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Update(func(state *State) error {
+		state.Update = UpdateState{Status: "unknown", CurrentVersion: "1.2.3", LastAttemptVersion: "1.2.4",
+			LastTrigger: "scheduled", OperationID: "recovered-operation", LastAttemptAt: now.Add(-time.Minute)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := u.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Update.Status != "success" || len(state.Deliveries) != 1 || state.Deliveries[0].Kind != "update_success" ||
+		!strings.Contains(state.Deliveries[0].Message, "定时触发") {
+		t.Fatalf("reconciled success did not queue notice: update=%+v deliveries=%+v", state.Update, state.Deliveries)
+	}
+}
+
+func TestUpdaterSuccessDeliveryRespectsSwitchAndRetriesIndependently(t *testing.T) {
+	now := time.Date(2026, 9, 29, 4, 0, 0, 0, time.UTC)
+	for _, tt := range []struct {
+		name         string
+		disableAfter bool
+		wantStatus   string
+		wantAttempts int
+	}{
+		{"switch disabled after queue", true, "skipped", 0},
+		{"temporary send failure", false, "succeeded", 2},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			settings := defaultUpdateConfig()
+			settings.NotifyTelegramEnabled = true
+			u, store := newTestUpdater(t, settings, now, &fakeUpdateAPI{})
+			cfg, err := store.Config()
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg.Telegram.Enabled = true
+			if err := store.SaveConfig(cfg); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Update(func(state *State) error {
+				state.Update = UpdateState{Status: "restarting", CurrentVersion: "1.2.3", OperationID: "operation-2"}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := u.markSuccess(cfg, "1.2.4", now); err != nil {
+				t.Fatal(err)
+			}
+			if tt.disableAfter {
+				cfg.Update.NotifyTelegramEnabled = false
+				if err := store.SaveConfig(cfg); err != nil {
+					t.Fatal(err)
+				}
+			}
+			clock := now
+			u.engine.Now = func() time.Time { return clock }
+			attempts := 0
+			u.engine.NotifyUpdate = func(context.Context, Config, string, string) error {
+				attempts++
+				if attempts == 1 {
+					return errors.New("temporary notification failure")
+				}
+				return nil
+			}
+			err = u.engine.processDeliveries(context.Background())
+			if tt.disableAfter {
+				if err != nil || attempts != 0 {
+					t.Fatalf("disabled notification was sent: err=%v attempts=%d", err, attempts)
+				}
+			} else {
+				if err == nil || attempts != 1 {
+					t.Fatalf("temporary failure was not recorded: err=%v attempts=%d", err, attempts)
+				}
+				state, err := store.Snapshot()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if state.Update.Status != "success" || state.Deliveries[0].Status != "failed" {
+					t.Fatalf("notification failure changed update result: %+v", state)
+				}
+				clock = now.Add(29 * time.Second)
+				if err := u.engine.processDeliveries(context.Background()); err != nil || attempts != 1 {
+					t.Fatalf("notification retried before backoff: err=%v attempts=%d", err, attempts)
+				}
+				clock = now.Add(30 * time.Second)
+				if err := u.engine.processDeliveries(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			state, err := store.Snapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state.Update.Status != "success" || len(state.Deliveries) != 1 || state.Deliveries[0].Status != tt.wantStatus ||
+				state.Deliveries[0].Attempts != tt.wantAttempts || attempts != tt.wantAttempts {
+				t.Fatalf("unexpected notification outcome: update=%+v deliveries=%+v calls=%d", state.Update, state.Deliveries, attempts)
+			}
+		})
 	}
 }
 

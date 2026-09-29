@@ -18,7 +18,20 @@ import (
 
 const notificationTimeout = 30 * time.Second
 
+const (
+	quotaEmailSubject  = "Sub2API 7d 额度通知"
+	updateEmailSubject = "Sub2API 自动更新成功"
+)
+
 func SendNotification(ctx context.Context, cfg Config, channel, message string) error {
+	return sendNotification(ctx, cfg, channel, quotaEmailSubject, message)
+}
+
+func SendUpdateNotification(ctx context.Context, cfg Config, channel, message string) error {
+	return sendNotification(ctx, cfg, channel, updateEmailSubject, message)
+}
+
+func sendNotification(ctx context.Context, cfg Config, channel, subject, message string) error {
 	if !utf8.ValidString(message) || strings.TrimSpace(message) == "" {
 		return errors.New("notification message must be nonempty UTF-8 text")
 	}
@@ -32,7 +45,7 @@ func SendNotification(ctx context.Context, cfg Config, channel, message string) 
 		if !cfg.Email.Enabled {
 			return errors.New("email notifications are disabled")
 		}
-		return sendEmail(ctx, cfg.Email, message)
+		return sendEmailWithSubject(ctx, cfg.Email, subject, message)
 	default:
 		return errors.New("unsupported notification channel")
 	}
@@ -40,6 +53,10 @@ func SendNotification(ctx context.Context, cfg Config, channel, message string) 
 
 func sendEmail(ctx context.Context, cfg EmailConfig, message string) error {
 	return sendEmailWithTLSConfig(ctx, cfg, message, &tls.Config{ServerName: cfg.Host, MinVersion: tls.VersionTLS12})
+}
+
+func sendEmailWithSubject(ctx context.Context, cfg EmailConfig, subject, message string) error {
+	return sendEmailWithTLSConfigAndSubject(ctx, cfg, subject, message, &tls.Config{ServerName: cfg.Host, MinVersion: tls.VersionTLS12})
 }
 
 func emailAddresses(cfg EmailConfig) (*mail.Address, []*mail.Address, error) {
@@ -71,7 +88,7 @@ func emailAddresses(cfg EmailConfig) (*mail.Address, []*mail.Address, error) {
 	return from, recipients, nil
 }
 
-func emailContent(from *mail.Address, recipients []*mail.Address, message string) string {
+func emailContent(from *mail.Address, recipients []*mail.Address, subject, message string) string {
 	to := make([]string, 0, len(recipients))
 	for _, recipient := range recipients {
 		to = append(to, recipient.String())
@@ -79,7 +96,7 @@ func emailContent(from *mail.Address, recipients []*mail.Address, message string
 	var content strings.Builder
 	content.WriteString("From: " + from.String() + "\r\n")
 	content.WriteString("To: " + strings.Join(to, ", ") + "\r\n")
-	content.WriteString("Subject: " + mime.QEncoding.Encode("UTF-8", "Sub2API 7d 额度通知") + "\r\n")
+	content.WriteString("Subject: " + mime.QEncoding.Encode("UTF-8", subject) + "\r\n")
 	content.WriteString("Date: " + time.Now().Format(time.RFC1123Z) + "\r\n")
 	content.WriteString("MIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n")
 	encoded := base64.StdEncoding.EncodeToString([]byte(message))
@@ -92,6 +109,13 @@ func emailContent(from *mail.Address, recipients []*mail.Address, message string
 }
 
 func sendEmailWithTLSConfig(ctx context.Context, cfg EmailConfig, message string, tlsConfig *tls.Config) error {
+	return sendEmailWithTLSConfigAndSubject(ctx, cfg, quotaEmailSubject, message, tlsConfig)
+}
+
+func sendEmailWithTLSConfigAndSubject(ctx context.Context, cfg EmailConfig, subject, message string, tlsConfig *tls.Config) error {
+	if !utf8.ValidString(subject) || strings.TrimSpace(subject) == "" || strings.ContainsAny(subject, "\r\n\x00") {
+		return errors.New("email subject is invalid")
+	}
 	if cfg.Host == "" || strings.TrimSpace(cfg.Host) != cfg.Host || strings.ContainsAny(cfg.Host, "\r\n\x00 /\\@") || cfg.Port < 1 || cfg.Port > 65535 {
 		return errors.New("SMTP host or port is invalid")
 	}
@@ -158,7 +182,7 @@ func sendEmailWithTLSConfig(ctx context.Context, cfg EmailConfig, message string
 	if err != nil {
 		return errors.New("SMTP server did not accept email data")
 	}
-	if _, err := io.WriteString(writer, emailContent(from, recipients, message)); err != nil {
+	if _, err := io.WriteString(writer, emailContent(from, recipients, subject, message)); err != nil {
 		return errors.New("SMTP email transmission failed")
 	}
 	if writer.Close() != nil {

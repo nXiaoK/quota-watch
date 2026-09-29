@@ -237,6 +237,10 @@ func (s *Store) Update(update func(*State) error) error {
 }
 
 func (s *Store) UpdateForConfig(expected Config, update func(*State) error) error {
+	return s.UpdateForConfigWithCurrent(expected, func(state *State, _ Config) error { return update(state) })
+}
+
+func (s *Store) UpdateForConfigWithCurrent(expected Config, update func(*State, Config) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	current, err := s.configLocked()
@@ -246,7 +250,7 @@ func (s *Store) UpdateForConfig(expected Config, update func(*State) error) erro
 	if current.BaseURL != expected.BaseURL || current.AdminAPIKey != expected.AdminAPIKey {
 		return errors.New("连接配置已改变，请刷新后重新操作")
 	}
-	return s.updateLocked(update)
+	return s.updateLocked(func(state *State) error { return update(state, current) })
 }
 
 func (s *Store) SaveRulesForConfig(expected Config, rules []Rule) error {
