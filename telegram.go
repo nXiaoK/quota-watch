@@ -39,7 +39,8 @@ type ManualDecision struct {
 
 type telegramButton struct {
 	Text         string `json:"text"`
-	CallbackData string `json:"callback_data"`
+	CallbackData string `json:"callback_data,omitempty"`
+	URL          string `json:"url,omitempty"`
 }
 
 type telegramMarkup struct {
@@ -196,6 +197,56 @@ func sendInteractiveTelegramRequest(ctx context.Context, cfg TelegramConfig, del
 		{{Text: "忽略", CallbackData: "qw:i:" + delivery.ManualRequestID}},
 	}}
 	return sendTelegramMessage(ctx, cfg, delivery.Message, markup, client)
+}
+
+// sub2apiReleaseURL accepts only a release tag, never an arbitrary URL from
+// the upstream version check. This keeps both the message and its link safe
+// when the version information is malformed or unexpected.
+func sub2apiReleaseURL(version string) (string, string, error) {
+	tag := version
+	if !strings.HasPrefix(tag, "v") {
+		tag = "v" + tag
+	}
+	if len(tag) < 2 || len(tag) > 96 || tag[1] < '0' || tag[1] > '9' {
+		return "", "", errors.New("Sub2API release version is invalid")
+	}
+	for _, ch := range tag[2:] {
+		if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '.' || ch == '-' || ch == '_' || ch == '+') {
+			return "", "", errors.New("Sub2API release version is invalid")
+		}
+	}
+	return tag, "https://github.com/Wei-Shaw/sub2api/releases/tag/" + url.PathEscape(tag), nil
+}
+
+// SendUpdateVersionPrompt asks for a durable decision about one release. The
+// callback carries only an opaque ID; the version remains in local state.
+func SendUpdateVersionPrompt(ctx context.Context, cfg Config, version, requestID string) error {
+	if !cfg.Telegram.Enabled {
+		return errors.New("Telegram notifications are disabled")
+	}
+	client, closeClient, err := newTelegramHTTPClient(cfg.Telegram, notificationTimeout)
+	if err != nil {
+		return err
+	}
+	defer closeClient()
+	return sendUpdateVersionPromptRequest(ctx, cfg.Telegram, version, requestID, client)
+}
+
+func sendUpdateVersionPromptRequest(ctx context.Context, cfg TelegramConfig, version, requestID string, client *http.Client) error {
+	if !validManualRequestID(requestID) {
+		return errors.New("update approval request ID is invalid")
+	}
+	tag, releaseURL, err := sub2apiReleaseURL(version)
+	if err != nil {
+		return err
+	}
+	markup := &telegramMarkup{InlineKeyboard: [][]telegramButton{
+		{{Text: "查看版本说明", URL: releaseURL}},
+		{{Text: "加入空闲更新队列", CallbackData: "qw:ua:" + requestID}},
+		{{Text: "拒绝此版本", CallbackData: "qw:ur:" + requestID}},
+	}}
+	message := "检测到 Sub2API 新版本：" + tag + "\n版本链接：" + releaseURL + "\n是否将此版本加入空闲更新队列？"
+	return sendTelegramMessage(ctx, cfg, message, markup, client)
 }
 
 func validManualRequestID(id string) bool {

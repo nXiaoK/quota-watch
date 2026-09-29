@@ -38,6 +38,7 @@ func mergeConfig(input ConfigInput, previous Config) (Config, error) {
 	if previous.BaseURL != "" && cfg.BaseURL != previous.BaseURL {
 		cfg.Update.IdleEnabled = false
 		cfg.Update.ScheduledEnabled = false
+		cfg.Update.NotifyAvailableTelegramEnabled = false
 		cfg.Update.NotifyTelegramEnabled = false
 		cfg.Update.NotifyEmailEnabled = false
 	}
@@ -99,8 +100,8 @@ func mergeConfig(input ConfigInput, previous Config) (Config, error) {
 	if strings.ContainsAny(cfg.AdminAPIKey, "\r\n") {
 		return Config{}, errors.New("管理员 Key 包含无效字符")
 	}
-	if (cfg.Update.IdleEnabled || cfg.Update.ScheduledEnabled) && (cfg.BaseURL == "" || cfg.AdminAPIKey == "") {
-		return Config{}, errors.New("启用自动更新前请配置 Sub2API 地址和管理员 Key")
+	if (cfg.Update.IdleEnabled || cfg.Update.ScheduledEnabled || cfg.Update.NotifyAvailableTelegramEnabled) && (cfg.BaseURL == "" || cfg.AdminAPIKey == "") {
+		return Config{}, errors.New("启用自动更新或新版本通知前请配置 Sub2API 地址和管理员 Key")
 	}
 	if !validUpdateTime(cfg.Update.WindowStart) || !validUpdateTime(cfg.Update.WindowEnd) || cfg.Update.WindowEnd <= cfg.Update.WindowStart {
 		return Config{}, errors.New("自动更新时段必须是同一天内递增的 HH:MM 时间")
@@ -113,6 +114,9 @@ func mergeConfig(input ConfigInput, previous Config) (Config, error) {
 	}
 	if cfg.Update.NotifyTelegramEnabled && !cfg.Telegram.Enabled {
 		return Config{}, errors.New("启用更新成功 Telegram 通知前请先启用 Telegram 通道")
+	}
+	if cfg.Update.NotifyAvailableTelegramEnabled && !manualTelegramReady(cfg.Telegram) {
+		return Config{}, errors.New("启用新版本确认前请配置 Telegram 私聊，或设置群组授权用户 ID")
 	}
 	if cfg.Update.NotifyEmailEnabled && !cfg.Email.Enabled {
 		return Config{}, errors.New("启用更新成功邮件通知前请先启用邮件通道")

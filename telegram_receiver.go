@@ -10,12 +10,14 @@ import (
 	"math"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 	"unicode/utf8"
 )
 
 type manualResetHandler interface {
 	DecideManualReset(context.Context, TelegramCallback) (ManualDecision, error)
+	DecideUpdateVersion(context.Context, TelegramCallback) (ManualDecision, error)
 	ProcessManualReset(context.Context, string) error
 }
 
@@ -121,14 +123,17 @@ func (r *TelegramReceiver) poll(ctx context.Context) (time.Duration, error) {
 		}
 		state.TelegramReceiver = receiverState
 	}
-	pending := false
-	for _, request := range state.ManualRequests {
-		if request.Status == "pending" && request.ExpiresAt.After(r.now()) {
-			pending = true
-			break
+	pendingManual := false
+	if !cfg.AutoResetEnabled {
+		for _, request := range state.ManualRequests {
+			if request.Status == "pending" && request.ExpiresAt.After(r.now()) {
+				pendingManual = true
+				break
+			}
 		}
 	}
-	if !cfg.Telegram.Enabled || !validTelegramToken(cfg.Telegram.BotToken) || cfg.AutoResetEnabled || !pending {
+	pendingUpdate := cfg.Update.NotifyAvailableTelegramEnabled && state.UpdateApproval.Status == "pending" && state.UpdateApproval.ExpiresAt.After(r.now())
+	if !cfg.Telegram.Enabled || !validTelegramToken(cfg.Telegram.BotToken) || (!pendingManual && !pendingUpdate) {
 		status := "idle"
 		if !cfg.Telegram.Enabled {
 			status = "disabled"
@@ -205,6 +210,7 @@ func (r *TelegramReceiver) setStatus(fingerprint, status, message string) error 
 
 func (r *TelegramReceiver) handleUpdate(ctx context.Context, cfg Config, client *http.Client, fingerprint string, update telegramUpdate) error {
 	decision := ManualDecision{}
+	manualAccepted := false
 	var callback TelegramCallback
 	if query := update.Callback; query != nil {
 		callback.UpdateID, callback.QueryID, callback.Data = update.UpdateID, query.ID, query.Data
@@ -213,9 +219,16 @@ func (r *TelegramReceiver) handleUpdate(ctx context.Context, cfg Config, client 
 			callback.FromID, callback.MessageID = query.From.ID, query.Message.MessageID
 			callback.ChatID, callback.ChatUsername, callback.ChatType = query.Message.Chat.ID, query.Message.Chat.Username, query.Message.Chat.Type
 			var err error
-			decision, err = r.engine.DecideManualReset(ctx, callback)
+			if strings.HasPrefix(callback.Data, "qw:ua:") || strings.HasPrefix(callback.Data, "qw:ur:") {
+				decision, err = r.engine.DecideUpdateVersion(ctx, callback)
+			} else if cfg.AutoResetEnabled {
+				decision.Text = "手动重置已关闭"
+			} else {
+				decision, err = r.engine.DecideManualReset(ctx, callback)
+				manualAccepted = decision.Accepted
+			}
 			if err != nil {
-				return errors.New("无法保存 Telegram 手动重置决策，本次更新将重试")
+				return errors.New("无法保存 Telegram 按钮决策，本次更新将重试")
 			}
 		}
 		if query.ID != "" {
@@ -248,7 +261,7 @@ func (r *TelegramReceiver) handleUpdate(ctx context.Context, cfg Config, client 
 	}); err != nil {
 		return errors.New("无法保存 Telegram 更新位置，本次更新将重试")
 	}
-	if decision.Accepted {
+	if manualAccepted {
 		if err := r.engine.ProcessManualReset(ctx, decision.RequestID); err != nil && !errors.Is(err, errEngineBusy) && ctx.Err() == nil {
 			r.logger.Warn("Telegram 手动重置执行未全部完成，请在管理页面核对结果")
 		}

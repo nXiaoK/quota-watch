@@ -37,6 +37,7 @@ export interface Config {
 export interface UpdateConfig {
   idle_enabled: boolean
   scheduled_enabled: boolean
+  notify_available_telegram_enabled: boolean
   notify_telegram_enabled: boolean
   notify_email_enabled: boolean
   window_start: string
@@ -53,6 +54,11 @@ export interface UpdateState {
   last_success_at?: string
   last_error?: string
   last_trigger?: string
+}
+
+export interface UpdateApproval {
+  version: string
+  status: string
 }
 
 export interface Rule {
@@ -222,6 +228,7 @@ export interface State {
     version: string
   }
   update: UpdateState
+  update_approval?: UpdateApproval
   busy: boolean
 }
 

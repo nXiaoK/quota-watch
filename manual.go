@@ -308,6 +308,10 @@ func (e *Engine) DecideManualReset(ctx context.Context, callback TelegramCallbac
 		return decision, err
 	}
 	err = e.manualConfigUpdate(cfg, func(state *State) error {
+		if cfg.AutoResetEnabled {
+			decision.Text = "全局自动重置已开启，手动重置按钮不可用"
+			return nil
+		}
 		index := manualRequestIndex(state, id)
 		if index < 0 {
 			return nil

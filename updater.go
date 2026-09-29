@@ -20,6 +20,8 @@ const (
 	updateVerifyTimeout = 2 * time.Minute
 )
 
+var errUpdateApprovalChanged = errors.New("更新版本确认或配置已改变")
+
 type updateAPI interface {
 	LatestUsage(context.Context) (time.Time, bool, error)
 	CheckUpdates(context.Context) (SystemUpdateInfo, error)
@@ -79,7 +81,7 @@ func (u *Updater) Tick(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if !cfg.Update.IdleEnabled && !cfg.Update.ScheduledEnabled {
+	if !cfg.Update.IdleEnabled && !cfg.Update.ScheduledEnabled && !cfg.Update.NotifyAvailableTelegramEnabled {
 		state, err := u.store.Snapshot()
 		if err != nil {
 			return err
@@ -116,6 +118,12 @@ func (u *Updater) Tick(ctx context.Context) error {
 	}
 	checkDue := state.Update.LastCheckAt.IsZero() || now.Sub(state.Update.LastCheckAt) >= updateCheckInterval ||
 		(state.Update.Status == "check_failed" && now.Sub(state.Update.LastCheckAt) >= updateRetryInterval)
+	if cfg.Update.NotifyAvailableTelegramEnabled && manualTelegramReady(cfg.Telegram) && state.Update.HasUpdate &&
+		(!updateApprovalScopeValid(cfg, &state, state.UpdateApproval) ||
+			state.UpdateApproval.Status == "pending" && !state.UpdateApproval.ExpiresAt.After(now) ||
+			state.UpdateApproval.Status == "expired" || state.UpdateApproval.Status == "invalid") {
+		checkDue = true
+	}
 	if inside && state.Update.LastScheduleCheckDate != day &&
 		(state.Update.LastCheckAt.Before(windowStart) || now.Sub(state.Update.LastCheckAt) >= updateRetryInterval) {
 		checkDue = true
@@ -130,6 +138,26 @@ func (u *Updater) Tick(ctx context.Context) error {
 		}
 	}
 	if !state.Update.HasUpdate || state.Update.LatestVersion == "" {
+		return nil
+	}
+	if updateVersionDeclined(&state) {
+		if state.Update.Status == "declined" {
+			return nil
+		}
+		return u.setUpdateState(cfg, func(s *UpdateState) { s.Status = "declined" })
+	}
+	if cfg.Update.NotifyAvailableTelegramEnabled && !updateApprovalGranted(cfg, &state) {
+		status := "awaiting_approval"
+		if state.UpdateApproval.Status == "declined" {
+			status = "declined"
+		}
+		u.logDiagnostic("approval", status, "version", state.Update.LatestVersion)
+		if state.Update.Status == status {
+			return nil
+		}
+		return u.setUpdateState(cfg, func(s *UpdateState) { s.Status = status })
+	}
+	if !cfg.Update.IdleEnabled && !cfg.Update.ScheduledEnabled {
 		return nil
 	}
 	if state.Update.LastAttemptVersion == state.Update.LatestVersion && state.Update.LastAttemptDate == day {
@@ -171,13 +199,19 @@ func (u *Updater) checkVersion(ctx context.Context, cfg Config, client updateAPI
 		u.logDiagnostic("version_check", "unsupported", "build_type", info.BuildType)
 		return u.recordCheckError(cfg, now, errors.New("主站未返回可自动更新的发布版本"))
 	}
+	if cfg.Update.NotifyAvailableTelegramEnabled && info.HasUpdate {
+		if _, _, err := sub2apiReleaseURL(info.LatestVersion); err != nil {
+			return u.recordCheckError(cfg, now, err)
+		}
+	}
 	status := "up_to_date"
 	if info.HasUpdate {
 		status = "available"
 	}
 	u.logDiagnostic("version_check", status, "current_version", info.CurrentVersion, "latest_version", info.LatestVersion,
 		"build_type", info.BuildType, "cached", info.Cached, "inside_window", inside)
-	return u.setUpdateState(cfg, func(s *UpdateState) {
+	return u.store.UpdateForConfigWithCurrent(cfg, func(state *State, current Config) error {
+		s := &state.Update
 		s.LastCheckAt = now
 		s.CurrentVersion = info.CurrentVersion
 		s.LatestVersion = info.LatestVersion
@@ -187,11 +221,53 @@ func (u *Updater) checkVersion(ctx context.Context, cfg Config, client updateAPI
 		if inside {
 			s.LastScheduleCheckDate = day
 		}
-		if info.HasUpdate {
-			s.Status = "available"
-		} else {
+		if !info.HasUpdate {
 			s.Status = "up_to_date"
+			if state.UpdateApproval.ID != "" {
+				state.UpdateApproval.Status = "superseded"
+				cancelUpdateAvailableDeliveries(state, now)
+			}
+			return nil
 		}
+		if updateVersionDeclined(state) {
+			s.Status = "declined"
+			cancelUpdateAvailableDeliveries(state, now)
+			return nil
+		}
+		if !current.Update.NotifyAvailableTelegramEnabled {
+			s.Status = "available"
+			return nil
+		}
+		if !manualTelegramReady(current.Telegram) {
+			s.Status = "approval_unavailable"
+			cancelUpdateAvailableDeliveries(state, now)
+			state.UpdateApproval = UpdateApproval{}
+			return nil
+		}
+		approval := state.UpdateApproval
+		stillCurrent := approval.Version == info.LatestVersion && updateApprovalScopeValid(current, state, approval) &&
+			(approval.Status == "approved" || approval.Status == "declined" ||
+				approval.Status == "pending" && approval.ExpiresAt.After(now))
+		if !stillCurrent {
+			cancelUpdateAvailableDeliveries(state, now)
+			var err error
+			approval, err = newUpdateApproval(current, info.LatestVersion, now)
+			if err != nil {
+				return err
+			}
+			state.UpdateApproval = approval
+			if err := queueUpdateAvailableDelivery(state, approval, now); err != nil {
+				return err
+			}
+			u.logger.Info("Sub2API 发现新版本，等待 Telegram 确认", "version", info.LatestVersion)
+		}
+		s.Status = "awaiting_approval"
+		if approval.Status == "approved" {
+			s.Status = "available"
+		} else if approval.Status == "declined" {
+			s.Status = "declined"
+		}
+		return nil
 	})
 }
 
@@ -303,6 +379,52 @@ func (u *Updater) perform(ctx context.Context, cfg Config, client updateAPI, now
 	if !state.Update.HasUpdate || state.Update.LatestVersion == "" {
 		return nil
 	}
+	if updateVersionDeclined(&state) {
+		return nil
+	}
+	if cfg.Update.NotifyAvailableTelegramEnabled {
+		if !updateApprovalGranted(cfg, &state) {
+			u.logDiagnostic("approval", "not_granted", "version", state.Update.LatestVersion)
+			return nil
+		}
+		approvedVersion := state.Update.LatestVersion
+		checkAt := u.now().UTC()
+		inside, checkDay, _, err := updateWindow(checkAt, cfg.Update)
+		if err != nil {
+			return err
+		}
+		// Sub2API's update endpoint installs its latest release, without a
+		// target-version parameter. Recheck immediately before the attempt so a
+		// newly published version requires its own Telegram decision.
+		if err := u.checkVersion(ctx, cfg, client, checkAt, inside, checkDay); err != nil {
+			return err
+		}
+		state, err = u.store.Snapshot()
+		if err != nil {
+			return err
+		}
+		if !state.Update.HasUpdate || state.Update.LatestVersion != approvedVersion || !updateApprovalGranted(cfg, &state) {
+			u.logDiagnostic("approval", "version_changed", "approved_version", approvedVersion,
+				"latest_version", state.Update.LatestVersion)
+			return nil
+		}
+		latest, exists, err := client.LatestUsage(ctx)
+		if err != nil {
+			u.logDiagnostic("idle_check", "read_failed", "step", "after_version_preflight")
+			return u.recordUpdateError(cfg, "waiting_idle", fmt.Errorf("版本复查后读取使用记录失败: %w", err))
+		}
+		idle, err := u.observeIdle(cfg, u.now().UTC(), latest, exists)
+		if err != nil || !idle {
+			return err
+		}
+		state, err = u.store.Snapshot()
+		if err != nil {
+			return err
+		}
+		if !state.Update.HasUpdate || state.Update.LatestVersion != approvedVersion || !updateApprovalGranted(cfg, &state) {
+			return nil
+		}
+	}
 	now = u.now().UTC()
 	_, day, _, err = updateWindow(now, cfg.Update)
 	if err != nil {
@@ -313,7 +435,14 @@ func (u *Updater) perform(ctx context.Context, cfg Config, client updateAPI, now
 		return err
 	}
 	previousUpdate := state.Update
-	if err := u.setUpdateState(cfg, func(s *UpdateState) {
+	if err := u.store.UpdateForConfigWithCurrent(cfg, func(currentState *State, currentConfig Config) error {
+		if !sameUpdateTriggerSettings(currentConfig.Update, cfg.Update) ||
+			cfg.Update.NotifyAvailableTelegramEnabled && !updateApprovalGranted(currentConfig, currentState) ||
+			currentState.Update.LatestVersion != state.Update.LatestVersion || !currentState.Update.HasUpdate ||
+			updateVersionDeclined(currentState) {
+			return errUpdateApprovalChanged
+		}
+		s := &currentState.Update
 		s.Status = "updating"
 		s.LastAttemptAt = now
 		s.LastAttemptDate = day
@@ -321,7 +450,12 @@ func (u *Updater) perform(ctx context.Context, cfg Config, client updateAPI, now
 		s.LastTrigger = trigger
 		s.LastError = ""
 		s.OperationID = opID
+		return nil
 	}); err != nil {
+		if errors.Is(err, errUpdateApprovalChanged) {
+			u.logDiagnostic("approval", "changed_before_update")
+			return nil
+		}
 		return err
 	}
 	restoreAttempt := func() error {
@@ -336,9 +470,21 @@ func (u *Updater) perform(ctx context.Context, cfg Config, client updateAPI, now
 	if err != nil {
 		return errors.Join(err, restoreAttempt())
 	}
-	if current.BaseURL != cfg.BaseURL || current.AdminAPIKey != cfg.AdminAPIKey || !sameUpdateTriggerSettings(current.Update, cfg.Update) {
+	if current.BaseURL != cfg.BaseURL || current.AdminAPIKey != cfg.AdminAPIKey || !sameUpdateTriggerSettings(current.Update, cfg.Update) ||
+		cfg.Update.NotifyAvailableTelegramEnabled && manualTelegramFingerprint(current.Telegram) != manualTelegramFingerprint(cfg.Telegram) {
 		u.logDiagnostic("update", "config_changed")
 		return restoreAttempt()
+	}
+	if cfg.Update.NotifyAvailableTelegramEnabled {
+		latestState, err := u.store.Snapshot()
+		if err != nil {
+			return errors.Join(err, restoreAttempt())
+		}
+		if !updateApprovalGranted(current, &latestState) || latestState.Update.LatestVersion != state.Update.LatestVersion ||
+			updateVersionDeclined(&latestState) {
+			u.logDiagnostic("approval", "changed_before_request")
+			return restoreAttempt()
+		}
 	}
 	// Persisting the attempt can cross the end of the scheduled window.
 	// Check once more immediately before sending the update request.
@@ -358,10 +504,13 @@ func (u *Updater) perform(ctx context.Context, cfg Config, client updateAPI, now
 	}
 	if result.AlreadyUpToDate {
 		u.logDiagnostic("update", "already_up_to_date")
-		return u.setUpdateState(cfg, func(s *UpdateState) {
+		return u.store.UpdateForConfig(cfg, func(state *State) error {
+			s := &state.Update
 			s.Status = "up_to_date"
 			s.HasUpdate = false
 			s.LastError = ""
+			state.UpdateApproval.Status = "superseded"
+			return nil
 		})
 	}
 	if !result.NeedRestart {
@@ -490,6 +639,7 @@ func (u *Updater) markSuccess(cfg Config, version string, now time.Time) error {
 		s.CurrentVersion = version
 		s.LatestVersion = version
 		s.HasUpdate = false
+		state.UpdateApproval.Status = "superseded"
 		s.LastSuccessAt = now
 		s.LastError = ""
 		if operationID == "" {
@@ -545,6 +695,7 @@ func updateSuccessMessage(previousVersion, version, trigger string, at time.Time
 
 func sameUpdateTriggerSettings(a, b UpdateConfig) bool {
 	return a.IdleEnabled == b.IdleEnabled && a.ScheduledEnabled == b.ScheduledEnabled &&
+		a.NotifyAvailableTelegramEnabled == b.NotifyAvailableTelegramEnabled &&
 		a.WindowStart == b.WindowStart && a.WindowEnd == b.WindowEnd && a.Timezone == b.Timezone
 }
 

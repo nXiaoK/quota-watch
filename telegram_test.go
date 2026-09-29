@@ -52,6 +52,48 @@ func TestInteractiveTelegramMessageContainsOnlyOpaqueCallbackIDs(t *testing.T) {
 	}
 }
 
+func TestUpdateVersionPromptLinksToReleaseAndUsesOpaqueCallbackIDs(t *testing.T) {
+	id := "0123456789abcdef0123456789abcdef"
+	const releaseURL = "https://github.com/Wei-Shaw/sub2api/releases/tag/v0.2.10"
+	client := &http.Client{Transport: notificationRoundTripper(func(req *http.Request) (*http.Response, error) {
+		var payload telegramMessage
+		if req.URL.Path != "/bot123:secret-token/sendMessage" || json.NewDecoder(req.Body).Decode(&payload) != nil {
+			t.Fatal("invalid update version Telegram request")
+		}
+		if payload.ChatID != "42" || !payload.DisableWebPagePreview || !strings.Contains(payload.Text, "v0.2.10") || !strings.Contains(payload.Text, releaseURL) {
+			t.Fatalf("update notification omitted the release link: %#v", payload)
+		}
+		if payload.ReplyMarkup == nil || len(payload.ReplyMarkup.InlineKeyboard) != 3 {
+			t.Fatal("update version buttons are missing")
+		}
+		buttons := payload.ReplyMarkup.InlineKeyboard
+		if len(buttons[0]) != 1 || buttons[0][0].URL != releaseURL || buttons[0][0].CallbackData != "" {
+			t.Fatal("release button does not point to the fixed upstream repository")
+		}
+		for i, prefix := range []string{"qw:ua:", "qw:ur:"} {
+			button := buttons[i+1][0]
+			if button.CallbackData != prefix+id || len(button.CallbackData) > 64 || button.URL != "" || strings.Contains(button.CallbackData, "0.2.10") {
+				t.Fatalf("update callback exposed version or was malformed: %#v", button)
+			}
+		}
+		return telegramTestResponse(200, `{"ok":true,"result":{"message_id":1}}`), nil
+	})}
+	cfg := TelegramConfig{BotToken: "123:secret-token", ChatID: "42"}
+	for _, version := range []string{"0.2.10", "v0.2.10"} {
+		if err := sendUpdateVersionPromptRequest(context.Background(), cfg, version, id, client); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, invalid := range []string{"v0.2.10\nhttps://evil.example", "../../evil", "v0.2.10?redirect=evil", "v0.2.10/evil", " v0.2.10"} {
+		if err := sendUpdateVersionPromptRequest(context.Background(), cfg, invalid, id, client); err == nil {
+			t.Fatalf("unsafe release version accepted: %q", invalid)
+		}
+	}
+	if err := sendUpdateVersionPromptRequest(context.Background(), cfg, "v0.2.10", "42", client); err == nil {
+		t.Fatal("nonopaque update request ID accepted")
+	}
+}
+
 func TestTelegramHTTPDefaultsAndProxyValidation(t *testing.T) {
 	client, closeClient, err := newTelegramHTTPClient(TelegramConfig{}, telegramPollTimeout)
 	if err != nil {

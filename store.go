@@ -325,6 +325,7 @@ func (s *Store) SaveConfig(cfg Config) error {
 		state.Observations = map[string]Observation{}
 		state.Health = Health{}
 		state.Update = UpdateState{}
+		state.UpdateApproval = UpdateApproval{}
 		normalizeState(&state)
 		for i := range state.Rules {
 			state.Rules[i].Enabled = false
@@ -348,6 +349,37 @@ func (s *Store) SaveConfig(cfg Config) error {
 				state.Deliveries[i].Status = "cancelled"
 			}
 		}
+		raw, err = json.Marshal(state)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec("INSERT INTO documents(name,payload) VALUES(?,?) ON CONFLICT(name) DO UPDATE SET payload=excluded.payload", "state", raw); err != nil {
+			return err
+		}
+	} else if previous.AdminAPIKey != cfg.AdminAPIKey ||
+		previous.Update.NotifyAvailableTelegramEnabled != cfg.Update.NotifyAvailableTelegramEnabled ||
+		manualTelegramFingerprint(previous.Telegram) != manualTelegramFingerprint(cfg.Telegram) {
+		var state State
+		var raw []byte
+		err := tx.QueryRow("SELECT payload FROM documents WHERE name = ?", "state").Scan(&raw)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if len(raw) > 0 {
+			if err := json.Unmarshal(raw, &state); err != nil {
+				return err
+			}
+		}
+		state.UpdateApproval = UpdateApproval{}
+		state.Update.LastCheckAt = time.Time{}
+		for i := range state.Deliveries {
+			item := &state.Deliveries[i]
+			if item.Kind == "update_available" && (item.Status == "pending" || item.Status == "failed" || item.Status == "running") {
+				item.Status = "cancelled"
+				item.UpdatedAt = time.Now().UTC()
+			}
+		}
+		normalizeState(&state)
 		raw, err = json.Marshal(state)
 		if err != nil {
 			return err

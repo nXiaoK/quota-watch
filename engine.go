@@ -26,16 +26,17 @@ type engineStore interface {
 }
 
 type Engine struct {
-	store             engineStore
-	logger            *slog.Logger
-	busy              atomic.Bool
-	verboseLogging    atomic.Bool
-	NewAdmin          func(Config) (AdminAPI, error)
-	Notify            func(context.Context, Config, string, string) error
-	NotifyUpdate      func(context.Context, Config, string, string) error
-	NotifyInteractive func(context.Context, Config, Delivery) error
-	Now               func() time.Time
-	wait              func(context.Context, time.Duration) error
+	store                 engineStore
+	logger                *slog.Logger
+	busy                  atomic.Bool
+	verboseLogging        atomic.Bool
+	NewAdmin              func(Config) (AdminAPI, error)
+	Notify                func(context.Context, Config, string, string) error
+	NotifyUpdate          func(context.Context, Config, string, string) error
+	NotifyUpdateAvailable func(context.Context, Config, string, string) error
+	NotifyInteractive     func(context.Context, Config, Delivery) error
+	Now                   func() time.Time
+	wait                  func(context.Context, time.Duration) error
 }
 
 var errEngineBusy = errors.New("已有检测或重置任务正在执行")
@@ -49,7 +50,8 @@ func newEngine(store engineStore, logger *slog.Logger) *Engine {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	return &Engine{
-		store: store, logger: logger, Now: time.Now, Notify: SendNotification, NotifyUpdate: SendUpdateNotification, NotifyInteractive: SendInteractiveNotification,
+		store: store, logger: logger, Now: time.Now, Notify: SendNotification, NotifyUpdate: SendUpdateNotification,
+		NotifyUpdateAvailable: SendUpdateVersionPrompt, NotifyInteractive: SendInteractiveNotification,
 		NewAdmin: func(cfg Config) (AdminAPI, error) {
 			client, err := NewAdminClient(cfg)
 			if err != nil {
@@ -1253,16 +1255,23 @@ func (e *Engine) sendDelivery(ctx context.Context, original Delivery) error {
 	if err != nil {
 		return err
 	}
-	enabled := (original.Channel == "telegram" && cfg.Telegram.Enabled) || (original.Channel == "email" && cfg.Email.Enabled)
-	if original.Kind == "update_success" {
-		enabled = enabled && ((original.Channel == "telegram" && cfg.Update.NotifyTelegramEnabled) ||
-			(original.Channel == "email" && cfg.Update.NotifyEmailEnabled))
-	}
 	claimed := false
 	attempts := 0
+	promptVersion := ""
 	update := e.store.Update
 	if original.ManualRequestID != "" {
 		update = func(fn func(*State) error) error { return e.manualConfigUpdate(cfg, fn) }
+	} else if original.Kind == "update_available" {
+		if scoped, ok := e.store.(interface {
+			UpdateForConfigWithCurrent(Config, func(*State, Config) error) error
+		}); ok {
+			update = func(fn func(*State) error) error {
+				return scoped.UpdateForConfigWithCurrent(cfg, func(state *State, current Config) error {
+					cfg = current
+					return fn(state)
+				})
+			}
+		}
 	}
 	if err := update(func(state *State) error {
 		for i := range state.Deliveries {
@@ -1270,10 +1279,19 @@ func (e *Engine) sendDelivery(ctx context.Context, original Delivery) error {
 			if item.ID != original.ID || (item.Status != "pending" && item.Status != "failed") || item.NextAttemptAt.After(e.Now()) {
 				continue
 			}
+			enabled := (original.Channel == "telegram" && cfg.Telegram.Enabled) || (original.Channel == "email" && cfg.Email.Enabled)
+			if original.Kind == "update_success" {
+				enabled = enabled && ((original.Channel == "telegram" && cfg.Update.NotifyTelegramEnabled) ||
+					(original.Channel == "email" && cfg.Update.NotifyEmailEnabled))
+			} else if original.Kind == "update_available" {
+				enabled = enabled && original.Channel == "telegram" && cfg.Update.NotifyAvailableTelegramEnabled
+			}
 			if !enabled {
 				reason := "通知渠道已关闭"
 				if item.Kind == "update_success" {
 					reason = "更新成功通知或通知渠道已关闭"
+				} else if item.Kind == "update_available" {
+					reason = "新版本确认或 Telegram 通道已关闭"
 				}
 				item.Status, item.LastError, item.UpdatedAt = "skipped", reason, e.Now()
 				return nil
@@ -1296,6 +1314,15 @@ func (e *Engine) sendDelivery(ctx context.Context, original Delivery) error {
 					return nil
 				}
 			}
+			if item.Kind == "update_available" {
+				approval := state.UpdateApproval
+				if item.Channel != "telegram" || item.UpdateRequestID == "" || approval.ID != item.UpdateRequestID ||
+					approval.Status != "pending" || !approval.ExpiresAt.After(e.Now()) || !updateApprovalScopeValid(cfg, state, approval) {
+					item.Status, item.LastError, item.UpdatedAt = "skipped", "版本确认已处理、失效或配置已改变", e.Now()
+					return nil
+				}
+				promptVersion = approval.Version
+			}
 			item.Status, item.UpdatedAt = "running", e.Now()
 			item.Attempts++
 			attempts, claimed = item.Attempts, true
@@ -1308,8 +1335,41 @@ func (e *Engine) sendDelivery(ctx context.Context, original Delivery) error {
 	if !claimed {
 		return nil
 	}
+	if original.Kind == "update_available" {
+		latestCfg, cfgErr := e.store.Config()
+		latestState, stateErr := e.store.Snapshot()
+		if cfgErr != nil || stateErr != nil {
+			return errors.Join(cfgErr, stateErr)
+		}
+		approval := latestState.UpdateApproval
+		deliveryRunning := false
+		for _, item := range latestState.Deliveries {
+			if item.ID == original.ID && item.Status == "running" {
+				deliveryRunning = true
+				break
+			}
+		}
+		if !deliveryRunning || approval.ID != original.UpdateRequestID || approval.Status != "pending" ||
+			!approval.ExpiresAt.After(e.Now()) || !updateApprovalScopeValid(latestCfg, &latestState, approval) {
+			if err := e.store.Update(func(state *State) error {
+				for i := range state.Deliveries {
+					item := &state.Deliveries[i]
+					if item.ID == original.ID && item.Status == "running" {
+						item.Status, item.LastError, item.UpdatedAt = "skipped", "版本确认已失效或配置已改变", e.Now()
+					}
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+			return nil
+		}
+		cfg = latestCfg
+	}
 	var sendErr error
-	if original.ManualRequestID != "" && original.Channel == "telegram" {
+	if original.Kind == "update_available" {
+		sendErr = e.NotifyUpdateAvailable(ctx, cfg, promptVersion, original.UpdateRequestID)
+	} else if original.ManualRequestID != "" && original.Channel == "telegram" {
 		sendErr = e.NotifyInteractive(ctx, cfg, original)
 	} else if original.Kind == "update_success" {
 		sendErr = e.NotifyUpdate(ctx, cfg, original.Channel, original.Message)
@@ -1321,6 +1381,9 @@ func (e *Engine) sendDelivery(ctx context.Context, original Delivery) error {
 			item := &state.Deliveries[i]
 			if item.ID != original.ID {
 				continue
+			}
+			if item.Status != "running" {
+				return nil
 			}
 			item.UpdatedAt, item.LastError = e.Now(), ""
 			if sendErr == nil {

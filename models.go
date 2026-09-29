@@ -20,13 +20,14 @@ type Config struct {
 }
 
 type UpdateConfig struct {
-	IdleEnabled           bool   `json:"idle_enabled"`
-	ScheduledEnabled      bool   `json:"scheduled_enabled"`
-	NotifyTelegramEnabled bool   `json:"notify_telegram_enabled"`
-	NotifyEmailEnabled    bool   `json:"notify_email_enabled"`
-	WindowStart           string `json:"window_start"`
-	WindowEnd             string `json:"window_end"`
-	Timezone              string `json:"timezone"`
+	IdleEnabled                    bool   `json:"idle_enabled"`
+	ScheduledEnabled               bool   `json:"scheduled_enabled"`
+	NotifyAvailableTelegramEnabled bool   `json:"notify_available_telegram_enabled"`
+	NotifyTelegramEnabled          bool   `json:"notify_telegram_enabled"`
+	NotifyEmailEnabled             bool   `json:"notify_email_enabled"`
+	WindowStart                    string `json:"window_start"`
+	WindowEnd                      string `json:"window_end"`
+	Timezone                       string `json:"timezone"`
 }
 
 func defaultUpdateConfig() UpdateConfig {
@@ -209,6 +210,7 @@ type Action struct {
 
 type Delivery struct {
 	ManualRequestID string    `json:"manual_request_id,omitempty"`
+	UpdateRequestID string    `json:"update_request_id,omitempty"`
 	Kind            string    `json:"kind,omitempty"`
 	ID              string    `json:"id"`
 	EventID         string    `json:"event_id"`
@@ -239,12 +241,27 @@ type State struct {
 	Deliveries       []Delivery             `json:"deliveries"`
 	Health           Health                 `json:"health"`
 	Update           UpdateState            `json:"update"`
+	UpdateApproval   UpdateApproval         `json:"update_approval"`
+}
+
+type UpdateApproval struct {
+	ID                    string    `json:"id,omitempty"`
+	Version               string    `json:"version,omitempty"`
+	Status                string    `json:"status,omitempty"`
+	ChatID                string    `json:"chat_id,omitempty"`
+	ConnectionFingerprint string    `json:"connection_fingerprint,omitempty"`
+	TelegramFingerprint   string    `json:"telegram_fingerprint,omitempty"`
+	CreatedAt             time.Time `json:"created_at"`
+	ExpiresAt             time.Time `json:"expires_at"`
+	DecisionAt            time.Time `json:"decision_at"`
+	ApprovedBy            int64     `json:"approved_by,omitempty"`
 }
 
 type UpdateState struct {
 	Status                string    `json:"status"`
 	CurrentVersion        string    `json:"current_version,omitempty"`
 	LatestVersion         string    `json:"latest_version,omitempty"`
+	DeclinedVersions      []string  `json:"declined_versions,omitempty"`
 	HasUpdate             bool      `json:"has_update"`
 	LastCheckAt           time.Time `json:"last_check_at"`
 	LastAttemptAt         time.Time `json:"last_attempt_at"`

@@ -15,11 +15,13 @@ import (
 )
 
 type receiverFakeEngine struct {
-	store     *memoryEngineStore
-	decide    func(TelegramCallback) (ManualDecision, error)
-	process   func(string) error
-	decisions int
-	processed int
+	store           *memoryEngineStore
+	decide          func(TelegramCallback) (ManualDecision, error)
+	decideUpdate    func(TelegramCallback) (ManualDecision, error)
+	process         func(string) error
+	decisions       int
+	updateDecisions int
+	processed       int
 }
 
 func (e *receiverFakeEngine) DecideManualReset(_ context.Context, callback TelegramCallback) (ManualDecision, error) {
@@ -44,6 +46,17 @@ func (e *receiverFakeEngine) ProcessManualReset(_ context.Context, id string) er
 		return e.process(id)
 	}
 	return nil
+}
+
+func (e *receiverFakeEngine) DecideUpdateVersion(_ context.Context, callback TelegramCallback) (ManualDecision, error) {
+	e.updateDecisions++
+	if e.decideUpdate != nil {
+		return e.decideUpdate(callback)
+	}
+	return ManualDecision{Text: "已加入空闲更新队列", Accepted: true, RequestID: receiverTestRequestID}, e.store.Update(func(state *State) error {
+		state.UpdateApproval.Status = "approved"
+		return nil
+	})
 }
 
 const receiverTestRequestID = "0123456789abcdef0123456789abcdef"
@@ -146,6 +159,64 @@ func TestTelegramReceiverIgnoreRemovesButtonsWithoutReset(t *testing.T) {
 	}
 	if engine.processed != 0 || !reflect.DeepEqual(methods, []string{"getUpdates", "answerCallbackQuery", "editMessageReplyMarkup"}) {
 		t.Fatalf("ignore caused a reset or left buttons: %#v", methods)
+	}
+}
+
+func TestTelegramReceiverUpdateApprovalPollsWithAutoResetAndDoesNotReset(t *testing.T) {
+	r, store, engine := receiverTestFixture()
+	store.cfg.AutoResetEnabled = true
+	store.cfg.Update.NotifyAvailableTelegramEnabled = true
+	store.state.ManualRequests = nil
+	store.state.UpdateApproval = UpdateApproval{ID: receiverTestRequestID, Version: "v0.2.10", Status: "pending", ExpiresAt: time.Now().Add(time.Hour)}
+	order := []string{}
+	engine.decideUpdate = func(callback TelegramCallback) (ManualDecision, error) {
+		if callback.Data != "qw:ua:"+receiverTestRequestID || callback.ChatID != 42 || callback.ChatType != "private" || callback.FromID != 42 {
+			t.Fatalf("update callback changed decision scope: %#v", callback)
+		}
+		order = append(order, "decide-update")
+		return ManualDecision{Text: "已加入空闲更新队列", Accepted: true, RequestID: receiverTestRequestID}, store.Update(func(state *State) error {
+			state.UpdateApproval.Status = "approved"
+			return nil
+		})
+	}
+	receiverUseTransport(r, func(req *http.Request) (*http.Response, error) {
+		method := req.URL.Path[strings.LastIndex(req.URL.Path, "/")+1:]
+		order = append(order, method)
+		if method == "getUpdates" {
+			return telegramTestResponse(200, `{"ok":true,"result":[`+strings.Replace(receiverCallbackJSON(0, ""), "qw:r:", "qw:ua:", 1)+`]}`), nil
+		}
+		state, _ := store.Snapshot()
+		if state.UpdateApproval.Status != "approved" {
+			t.Fatal("Telegram answered before update approval became durable")
+		}
+		return telegramTestResponse(200, `{"ok":true,"result":true}`), nil
+	})
+	if _, err := r.poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state, _ := store.Snapshot()
+	if state.TelegramReceiver.Offset != 1 || engine.updateDecisions != 1 || engine.decisions != 0 || engine.processed != 0 || !reflect.DeepEqual(order, []string{"getUpdates", "decide-update", "answerCallbackQuery", "editMessageReplyMarkup"}) {
+		t.Fatalf("update approval callback was not handled exactly once without reset: %#v, %#v", order, state.UpdateApproval)
+	}
+}
+
+func TestTelegramReceiverDoesNotApproveOldManualResetWhilePollingUpdateChoice(t *testing.T) {
+	r, store, engine := receiverTestFixture()
+	store.cfg.AutoResetEnabled = true
+	store.cfg.Update.NotifyAvailableTelegramEnabled = true
+	store.state.UpdateApproval = UpdateApproval{ID: receiverTestRequestID, Version: "v0.2.10", Status: "pending", ExpiresAt: time.Now().Add(time.Hour)}
+	receiverUseTransport(r, func(req *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(req.URL.Path, "/getUpdates") {
+			return telegramTestResponse(200, `{"ok":true,"result":[`+receiverCallbackJSON(0, "")+`]}`), nil
+		}
+		return telegramTestResponse(200, `{"ok":true,"result":true}`), nil
+	})
+	if _, err := r.poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state, _ := store.Snapshot()
+	if engine.decisions != 0 || engine.processed != 0 || state.ManualRequests[0].Status != "pending" {
+		t.Fatal("old manual reset callback was accepted after auto reset was enabled")
 	}
 }
 

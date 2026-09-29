@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, ref, toRaw, watch } from 'vue'
 import { dateTime, statusText } from '../format'
-import type { Config, TelegramReceiverState, UpdateState } from '../types'
+import type { Config, TelegramReceiverState, UpdateApproval, UpdateState } from '../types'
 import UiIcon from './UiIcon.vue'
 
-const props = defineProps<{ config: Config; receiver: TelegramReceiverState; update: UpdateState; acknowledgingUpdate: boolean; acknowledgeError: string; saving: boolean; testingConnection: boolean; testingTelegram: boolean; testingEmail: boolean }>()
+const props = defineProps<{ config: Config; receiver: TelegramReceiverState; update: UpdateState; approval?: UpdateApproval; acknowledgingUpdate: boolean; acknowledgeError: string; saving: boolean; testingConnection: boolean; testingTelegram: boolean; testingEmail: boolean }>()
 const emit = defineEmits<{ save: [config: Config]; testConnection: [config: Config]; testNotification: [channel: 'telegram' | 'email', config: Config]; acknowledgeUpdate: [] }>()
 const draft = ref<Config>(structuredClone(toRaw(props.config)))
 const recipients = ref(props.config.email.recipients.join('\n'))
@@ -16,8 +16,15 @@ const updateStatus = computed(() => ({
   disabled: '已关闭', up_to_date: '已是最新版本', available: '发现新版本', waiting_idle: '等待空闲',
   checking: '正在检查更新', check_failed: '检查更新失败', updating: '正在更新', restarting: '等待站点重启',
   success: '更新成功', failed: '更新失败', unknown: '结果待核对', already_attempted: '已尝试此版本',
+  awaiting_approval: '等待 Telegram 确认', queued: '已加入更新队列', declined: '已拒绝此版本',
+  approval_unavailable: 'Telegram 确认不可用',
 } as Record<string, string>)[props.update.status] ?? (props.update.status || '尚无记录'))
 const updateTrigger = computed(() => props.update.last_trigger === 'idle' ? '空闲触发' : props.update.last_trigger === 'scheduled' ? '定时触发' : props.update.last_trigger || '')
+const updateApprovalStatus = computed(() => ({
+  pending: '等待 Telegram 确认', approved: '已批准，等待自动更新条件',
+  declined: '已拒绝此版本', superseded: '已有新版本，此选择已失效',
+  expired: '确认已过期', invalid: '配置或版本已变化',
+} as Record<string, string>)[props.approval?.status ?? ''] ?? (props.approval?.status || '—'))
 
 watch(() => props.config, (config) => {
   draft.value = structuredClone(toRaw(config))
@@ -86,12 +93,14 @@ function submit(action: 'save' | 'connection' | 'telegram' | 'email') {
       </div>
     </section>
     <section class="panel settings-section">
-      <div class="panel-heading"><div class="section-title"><span class="section-icon"><UiIcon name="refresh" /></span><div><h2>Sub2API 自动更新</h2><p class="muted">发现新版本后按空闲或指定时段更新站点</p></div></div></div>
+      <div class="panel-heading"><div class="section-title"><span class="section-icon"><UiIcon name="refresh" /></span><div><h2>Sub2API 自动更新</h2><p class="muted">发现新版本后通知确认，按空闲或指定时段更新站点</p></div></div></div>
       <div class="settings-body">
         <label class="toggle-row"><span><strong>空闲时自动更新</strong><small>需要连续 10 分钟没有任何使用记录；记录读取失败时不会判断为空闲。</small></span><input v-model="draft.update.idle_enabled" class="switch" type="checkbox" role="switch" aria-label="空闲时自动更新 Sub2API" /></label>
         <label class="toggle-row"><span><strong>指定时段自动更新</strong><small>每天在下方时段内检查新版本，并等待满足连续 10 分钟无使用记录；窗口结束仍不空闲就跳过当天。</small></span><input v-model="draft.update.scheduled_enabled" class="switch" type="checkbox" role="switch" aria-label="指定时段自动更新 Sub2API" /></label>
         <div class="form-grid three update-window"><label class="field"><span>开始时间</span><input v-model="draft.update.window_start" type="time" step="60" /></label><label class="field"><span>结束时间</span><input v-model="draft.update.window_end" type="time" step="60" /></label><label class="field"><span>时区</span><input v-model="draft.update.timezone" type="text" placeholder="Asia/Shanghai" autocomplete="off" /><small>使用 IANA 时区名称。</small></label></div>
         <p class="muted caption">两个开关可以独立使用；指定时段默认是 Asia/Shanghai 每天 02:00–03:00。自动更新与上方的订阅自动重置分别控制。</p>
+        <label class="toggle-row"><span><strong>发现新版本时 Telegram 确认</strong><small>检测到新版本后发送带 GitHub 发布页链接的通知；在 Telegram 中选择加入空闲更新队列或拒绝此版本。需启用并配置下方的 Telegram 通道。</small></span><input v-model="draft.update.notify_available_telegram_enabled" class="switch" type="checkbox" role="switch" aria-label="发现 Sub2API 新版本时通过 Telegram 确认" /></label>
+        <p class="muted caption">开启后，只有确认的版本才会按上面的空闲或时段规则尝试安装；安装前会再次检查最新版本。拒绝某版本后，即使关闭此开关也不会自动安装该版本；关闭开关后，其他版本恢复无需确认的自动更新。两个自动更新开关都关闭时仍会检查并通知，但不会安装。</p>
         <label class="toggle-row"><span><strong>更新成功后通知 Telegram</strong><small>更新、重启及版本核对成功后发送；还需启用并配置下方的 Telegram 通道。</small></span><input v-model="draft.update.notify_telegram_enabled" class="switch" type="checkbox" role="switch" aria-label="Sub2API 更新成功后通知 Telegram" /></label>
         <label class="toggle-row"><span><strong>更新成功后通知邮件</strong><small>更新、重启及版本核对成功后发送；还需启用并配置下方的邮件通道。</small></span><input v-model="draft.update.notify_email_enabled" class="switch" type="checkbox" role="switch" aria-label="Sub2API 更新成功后通知邮件" /></label>
         <div class="inline-message warning">Sub2API 若运行在 Docker 容器中，API 原地更新不会写回镜像，重建容器后更新会丢失；请通过更新镜像部署新版本。</div>
@@ -104,6 +113,7 @@ function submit(action: 'save' | 'connection' | 'telegram' | 'email') {
             <p class="caption muted">最近尝试：{{ dateTime(update.last_attempt_at) }}</p>
             <p class="caption muted">最近成功：{{ dateTime(update.last_success_at) }}</p>
             <p class="caption muted">触发方式：{{ updateTrigger || '—' }}</p>
+            <p v-if="approval?.version" class="caption muted">版本确认：{{ updateApprovalStatus }}（{{ approval.version }}）</p>
           </div>
           <p v-if="update.last_error" class="error-text">{{ update.last_error }}</p>
           <div v-if="update.status === 'unknown'" class="update-recovery">
@@ -115,17 +125,17 @@ function submit(action: 'save' | 'connection' | 'telegram' | 'email') {
       </div>
     </section>
     <section class="panel settings-section">
-      <div class="panel-heading"><div class="section-title"><span class="section-icon"><UiIcon name="bell" /></span><div><h2>Telegram</h2><p class="muted">向个人聊天或群组发送重置消息</p></div></div><input v-model="draft.telegram.enabled" class="switch" type="checkbox" role="switch" aria-label="启用 Telegram 通知渠道" /></div>
+      <div class="panel-heading"><div class="section-title"><span class="section-icon"><UiIcon name="bell" /></span><div><h2>Telegram</h2><p class="muted">向个人聊天或群组发送重置及更新通知</p></div></div><input v-model="draft.telegram.enabled" class="switch" type="checkbox" role="switch" aria-label="启用 Telegram 通知渠道" /></div>
       <div class="settings-body">
         <label class="field"><span>Bot Token <span v-if="config.telegram.bot_token_configured" class="status-pill success">已配置</span></span><input v-model="draft.telegram.bot_token" type="password" autocomplete="new-password" spellcheck="false" :placeholder="config.telegram.bot_token_configured ? '留空保留已保存的 Token' : '填入 Bot Token'" :disabled="draft.clear_telegram_token" /></label>
         <label v-if="config.telegram.bot_token_configured" class="checkbox-label"><input v-model="draft.clear_telegram_token" type="checkbox" /> 清除已保存的 Bot Token</label>
         <label class="field"><span>Chat ID</span><input v-model="draft.telegram.chat_id" type="text" placeholder="例如：123456789 或 -1001234567890" autocomplete="off" /><small>需先向机器人发送消息，或将机器人加入目标群组。</small></label>
-        <label v-if="telegramGroup" class="field"><span>允许操作的 Telegram 用户 ID（可选）</span><textarea v-model="allowedUsers" rows="3" inputmode="numeric" placeholder="每行一个 Telegram 用户 ID，或使用逗号分隔" /><small>填写用户的数字 ID，不是 @用户名。群组需指定允许确认重置或忽略的用户。</small></label>
-        <div v-if="telegramGroup && !allowedUsers.trim()" class="inline-message muted-note">当前群组未指定允许操作的用户。通知仍会发送，群成员不能确认重置或忽略。</div>
-        <p v-if="draft.telegram.chat_id.trim() && !telegramGroup" class="muted caption">个人私聊仅收件人本人可以确认重置或忽略，无需填写授权用户。</p>
+        <label v-if="telegramGroup" class="field"><span>允许操作的 Telegram 用户 ID（可选）</span><textarea v-model="allowedUsers" rows="3" inputmode="numeric" placeholder="每行一个 Telegram 用户 ID，或使用逗号分隔" /><small>填写用户的数字 ID，不是 @用户名。群组需指定允许操作重置或更新按钮的用户。</small></label>
+        <div v-if="telegramGroup && !allowedUsers.trim()" class="inline-message muted-note">当前群组未指定允许操作的用户。通知仍会发送，群成员不能确认重置或更新。</div>
+        <p v-if="draft.telegram.chat_id.trim() && !telegramGroup" class="muted caption">个人私聊仅收件人本人可以操作重置或更新按钮，无需填写授权用户。</p>
         <label class="field"><span>代理地址（可选）<span v-if="config.telegram.proxy_url_configured" class="status-pill success">已配置</span></span><input v-model="draft.telegram.proxy_url" type="password" autocomplete="new-password" spellcheck="false" :placeholder="config.telegram.proxy_url_configured ? '留空保留已保存的代理' : 'http://… 或 socks5://…'" :disabled="draft.clear_telegram_proxy" /><small>代理地址可能包含密码，按敏感信息保存，不在页面回显。</small></label>
         <label v-if="config.telegram.proxy_url_configured" class="checkbox-label"><input v-model="draft.clear_telegram_proxy" type="checkbox" /> 清除已保存的代理地址</label>
-        <p class="muted caption">手动确认无需配置公网地址。请使用专供本服务的 Bot，避免其他程序或已有 Webhook 占用按钮接收。</p>
+        <p class="muted caption">按钮确认无需配置公网地址。请使用专供本服务的 Bot，避免其他程序或已有 Webhook 占用按钮接收。</p>
         <div class="action-record">
           <div class="action-record-heading"><div><strong>按钮接收状态</strong><span class="status-pill" :class="{ success: ['healthy', 'ok', 'listening', 'polling', 'running'].includes(receiver.status), error: ['error', 'conflict', 'webhook'].includes(receiver.status) }">{{ receiver.status ? statusText(receiver.status) : '尚未启动' }}</span></div></div>
           <p class="caption muted">最近检查 {{ dateTime(receiver.checked_at) }}</p>
