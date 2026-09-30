@@ -4,7 +4,7 @@
 
 ## 一键更新
 
-已有本仓库 Docker Compose 部署时，在**原部署目录**运行。脚本需要 Git、Docker Compose v2、Python 3、`mktemp`、`tar`、Docker 访问权限及构建镜像的网络访问；当前分支须为 `main`、Git 工作树须干净，原容器须正在运行：
+已有本仓库 Docker Compose 部署时，在**原部署目录**运行。脚本需要 Git、Docker Compose v2、`mktemp`、`tar`、Docker 访问权限及构建镜像的网络访问；当前分支须为 `main`、Git 工作树须干净，原容器须正在运行。若缺少 Python 3，脚本会在停机前通过 `apt-get`、`dnf`、`yum`、`apk`、`zypper` 或 `pacman` 尝试安装；非 root 用户需有 `sudo` 权限，安装失败则保留原容器运行：
 
 ```sh
 ./update.sh

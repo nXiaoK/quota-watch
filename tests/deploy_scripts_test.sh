@@ -278,7 +278,64 @@ set -Eeuo pipefail
 printf '%s\n' "$*" >> "$FAKE_STATE/sleep.calls"
 MOCK_SLEEP
 
-  chmod +x "$fixture/bin/docker" "$fixture/bin/openssl" "$fixture/bin/git" "$fixture/bin/sleep"
+  # Bash reads BASH_ENV before running update.sh. This hides python3 only from
+  # the prerequisite check, so the host Python can run the rest of the update
+  # after the mocked package installation completes.
+  cat > "$fixture/bash_env" <<'MOCK_BASH_ENV'
+command() {
+  if [[ ${1:-} == -v ]]; then
+    case ${2:-} in
+      python3)
+        if [[ -f $FAKE_STATE/simulate_missing_python && ! -f $FAKE_STATE/python_installed ]]; then
+          return 1
+        fi
+        ;;
+      sudo)
+        [[ ! -f $FAKE_STATE/simulate_missing_sudo ]] || return 1
+        ;;
+      apt-get|apt|dnf|yum|microdnf|apk|pacman|zypper)
+        [[ ! -f $FAKE_STATE/simulate_no_package_manager ]] || return 1
+        ;;
+    esac
+  fi
+  builtin command "$@"
+}
+MOCK_BASH_ENV
+
+  cat > "$fixture/bin/uname" <<'MOCK_UNAME'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+if [[ -f $FAKE_STATE/simulate_linux && ${1:-} == -s ]]; then
+  printf 'Linux\n'
+else
+  exec /usr/bin/uname "$@"
+fi
+MOCK_UNAME
+
+  cat > "$fixture/bin/id" <<'MOCK_ID'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+if [[ -f $FAKE_STATE/simulate_linux && ${1:-} == -u ]]; then
+  if [[ -f $FAKE_STATE/simulate_nonroot ]]; then printf '1000\n'; else printf '0\n'; fi
+else
+  exec /usr/bin/id "$@"
+fi
+MOCK_ID
+
+cat > "$fixture/bin/apt-get" <<'MOCK_APT'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+printf '%s\n' "$*" >> "$FAKE_STATE/apt.calls"
+if [[ -f $FAKE_STATE/apt_install_fail && " $* " == *' install '* ]]; then
+  exit 94
+fi
+if [[ " $* " == *' install '* && " $* " == *' python3 '* ]]; then
+  touch "$FAKE_STATE/python_installed"
+fi
+MOCK_APT
+
+  chmod +x "$fixture/bin/docker" "$fixture/bin/openssl" "$fixture/bin/git" "$fixture/bin/sleep" \
+    "$fixture/bin/uname" "$fixture/bin/id" "$fixture/bin/apt-get"
   printf '%s\n' "$fixture"
 }
 
@@ -350,6 +407,76 @@ run_update_success_test() {
   assert_contains "$backup_dir/compose-files.txt" "$fixture/override.yaml"
   [[ $(<"$fixture/state/current_container") == new-container ]] || fail 'update did not recreate the service'
   printf 'PASS: update preserves original Compose project, configuration and /data\n'
+}
+
+run_missing_python_install_test() {
+  local fixture output
+  fixture=$(make_update_fixture missing_python_install)
+  output="$fixture/update.out"
+  touch "$fixture/state/simulate_linux" "$fixture/state/simulate_missing_python"
+  cp "$fixture/.env" "$fixture/original.env"
+  env PATH="$fixture/bin:$PATH" BASH_ENV="$fixture/bash_env" FAKE_STATE="$fixture/state" \
+    DEPLOY_DIR="$fixture" QW_BACKUP_ROOT="$test_root/backups-missing_python_install" \
+    bash "$fixture/update.sh" > "$output" 2>&1 \
+    || fail "update did not install missing Python: $(cat "$output")"
+
+  assert_contains "$fixture/state/apt.calls" 'update'
+  assert_contains "$fixture/state/apt.calls" 'install'
+  assert_contains "$fixture/state/apt.calls" 'python3'
+  [[ -f $fixture/state/python_installed ]] || fail 'apt-get did not install Python'
+  [[ $(<"$fixture/state/current_container") == new-container ]] \
+    || fail 'update stopped after installing Python'
+  cmp -s "$fixture/.env" "$fixture/original.env" || fail 'Python installation changed credentials'
+  assert_contains "$output" 'Quota Watch 已更新并通过健康检查'
+  printf 'PASS: missing Python is installed with apt-get before a successful update\n'
+}
+
+run_missing_python_preflight_tests() {
+  local kind fixture output
+  for kind in simulate_missing_sudo simulate_no_package_manager; do
+    fixture=$(make_update_fixture "$kind")
+    output="$fixture/update.out"
+    touch "$fixture/state/simulate_linux" "$fixture/state/simulate_missing_python" \
+      "$fixture/state/$kind"
+    if [[ $kind == simulate_missing_sudo ]]; then
+      touch "$fixture/state/simulate_nonroot"
+    fi
+    if env PATH="$fixture/bin:$PATH" BASH_ENV="$fixture/bash_env" FAKE_STATE="$fixture/state" \
+      DEPLOY_DIR="$fixture" QW_BACKUP_ROOT="$test_root/backups-$kind" \
+      bash "$fixture/update.sh" > "$output" 2>&1; then
+      fail "update proceeded without Python when $kind"
+    fi
+    if [[ $kind == simulate_missing_sudo ]]; then
+      assert_contains "$output" 'sudo'
+    else
+      assert_contains "$output" '包管理器'
+    fi
+    assert_absent "$fixture/state/docker.calls" 'stop --time 45'
+    assert_absent "$fixture/state/git.calls" 'pull --ff-only'
+    [[ $(<"$fixture/state/old_status") == running ]] \
+      || fail "missing Python preflight $kind stopped the old service"
+  done
+  printf 'PASS: missing permissions or package manager fails before downtime\n'
+}
+
+run_python_install_failure_test() {
+  local fixture output
+  fixture=$(make_update_fixture python_install_failure)
+  output="$fixture/update.out"
+  touch "$fixture/state/simulate_linux" "$fixture/state/simulate_missing_python" \
+    "$fixture/state/apt_install_fail"
+  if env PATH="$fixture/bin:$PATH" BASH_ENV="$fixture/bash_env" FAKE_STATE="$fixture/state" \
+    DEPLOY_DIR="$fixture" QW_BACKUP_ROOT="$test_root/backups-python_install_failure" \
+    bash "$fixture/update.sh" > "$output" 2>&1; then
+    fail 'update proceeded after apt-get failed to install Python'
+  fi
+  assert_contains "$fixture/state/apt.calls" 'install'
+  assert_contains "$output" 'apt-get 安装 python3 失败'
+  assert_absent "$fixture/state/docker.calls" 'stop --time 45'
+  assert_absent "$fixture/state/git.calls" 'pull --ff-only'
+  [[ $(<"$fixture/state/old_status") == running ]] \
+    || fail 'failed Python installation stopped the old service'
+  printf 'PASS: failed Python installation leaves the old service running\n'
 }
 
 run_preflight_rejection_tests() {
@@ -479,6 +606,9 @@ run_recovery_failure_test() {
 
 run_install_tests
 run_update_success_test
+run_missing_python_install_test
+run_missing_python_preflight_tests
+run_python_install_failure_test
 run_preflight_rejection_tests
 run_backup_recovery_test
 run_automatic_recovery_tests

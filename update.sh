@@ -10,9 +10,44 @@ fail() {
   exit 1
 }
 
-for tool in docker git mktemp python3 tar; do
+for tool in docker git mktemp tar; do
   command -v "$tool" >/dev/null 2>&1 || fail "缺少 $tool"
 done
+run_as_root() {
+  if [[ $(id -u) == 0 ]]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+ensure_python3() {
+  command -v python3 >/dev/null 2>&1 && return 0
+  [[ $(uname -s) == Linux ]] || fail '缺少 python3；自动安装仅支持 Linux，请先安装 Python 3'
+
+  if [[ $(id -u) != 0 ]]; then
+    command -v sudo >/dev/null 2>&1 || fail '缺少 python3，且当前用户没有 sudo；请用 root 安装 Python 3 后重试'
+  fi
+  printf '未找到 Python 3，正在通过系统包管理器安装。\n'
+  if command -v apt-get >/dev/null 2>&1; then
+    run_as_root apt-get update || fail 'apt-get update 失败，原容器未停止'
+    run_as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 \
+      || fail 'apt-get 安装 python3 失败，原容器未停止'
+  elif command -v dnf >/dev/null 2>&1; then
+    run_as_root dnf install -y python3 || fail 'dnf 安装 python3 失败，原容器未停止'
+  elif command -v yum >/dev/null 2>&1; then
+    run_as_root yum install -y python3 || fail 'yum 安装 python3 失败，原容器未停止'
+  elif command -v apk >/dev/null 2>&1; then
+    run_as_root apk add --no-cache python3 || fail 'apk 安装 python3 失败，原容器未停止'
+  elif command -v zypper >/dev/null 2>&1; then
+    run_as_root zypper --non-interactive install python3 || fail 'zypper 安装 python3 失败，原容器未停止'
+  elif command -v pacman >/dev/null 2>&1; then
+    run_as_root pacman --noconfirm -S python || fail 'pacman 安装 python3 失败，原容器未停止'
+  else
+    fail '缺少 python3，未找到受支持的包管理器；请手动安装 Python 3 后重试'
+  fi
+  command -v python3 >/dev/null 2>&1 || fail '包管理器运行后仍找不到 python3，原容器未停止'
+  printf 'Python 3 已安装，继续更新。\n'
+}
 docker compose version >/dev/null 2>&1 || fail '需要 Docker Compose v2'
 docker info >/dev/null 2>&1 || fail '无法连接 Docker，请检查服务和当前用户权限'
 [[ -f .env && -f compose.yaml ]] || fail '请在原部署目录运行；需要保留原 .env 和 compose.yaml'
@@ -96,6 +131,7 @@ if service.get("env_file") or service.get("secrets") or service.get("configs"):
 }
 compose config --quiet || fail '原 Compose 配置无效；请检查 .env 和配置文件'
 [[ $(compose ps --all -q quota-watch) == "$container" ]] || fail 'Compose 配置未指向原容器，请按 UPDATING.md 核对项目和配置'
+ensure_python3
 check_external_references || fail '无法独立备份原 Compose 的外部凭据或配置文件'
 check_effective_environment || fail '不能确定原登录凭据和主密钥会被保留；请按 UPDATING.md 手动核对原部署'
 

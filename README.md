@@ -49,7 +49,7 @@ cd quota-watch
 
 若首次构建或健康检查失败，脚本会保留已生成的 `.env`。排查 Docker 日志后，在同一目录运行 `./install.sh --resume`，复用原凭据继续安装；不要删除 `.env` 重新生成密钥。
 
-**已有 `.env` 或 Docker 部署时不要重新运行安装脚本。**已有本仓库 Docker Compose 部署，在原部署目录运行 `./update.sh`；更新脚本另需 Python 3。它会核对原容器的凭据和 `/data` 挂载；使用额外挂载、Compose `env_file`、`secrets` 或 `configs` 的部署，请按 [生产环境更新步骤](UPDATING.md)中的手动流程核对。更新必须沿用原 Compose project、配置和数据卷；直接换目录启动可能挂载新的空数据卷，也不要用 `.env.example` 覆盖已有 `.env`。
+**已有 `.env` 或 Docker 部署时不要重新运行安装脚本。**已有本仓库 Docker Compose 部署，在原部署目录运行 `./update.sh`；缺少 Python 3 时，脚本会在停机前尝试通过 Linux 包管理器安装。它会核对原容器的凭据和 `/data` 挂载；使用额外挂载、Compose `env_file`、`secrets` 或 `configs` 的部署，请按 [生产环境更新步骤](UPDATING.md)中的手动流程核对。更新必须沿用原 Compose project、配置和数据卷；直接换目录启动可能挂载新的空数据卷，也不要用 `.env.example` 覆盖已有 `.env`。
 
 打开 `http://127.0.0.1:8091`，在登录页使用安装完成时显示的用户名和密码登录。登录页及工作台都可以切换浅色/深色主题。默认仅映射本机端口；远程访问可使用 SSH 隧道：
 
