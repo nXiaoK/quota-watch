@@ -9,6 +9,7 @@ import (
 // or a tick outside the window must not erase the reason it could not update.
 // Persisting Reported also prevents repeats after restart or delivery pruning.
 type UpdateScheduleWindow struct {
+	ForceEnabled   bool      `json:"force_enabled"`
 	Day            string    `json:"day"`
 	WindowStart    string    `json:"window_start"`
 	WindowEnd      string    `json:"window_end"`
@@ -26,7 +27,7 @@ type UpdateScheduleWindow struct {
 
 func scheduleWindowMatches(w *UpdateScheduleWindow, cfg UpdateConfig) bool {
 	return w != nil && cfg.ScheduledEnabled && cfg.NotifyWindowMissedTelegramEnabled &&
-		w.WindowStart == cfg.WindowStart && w.WindowEnd == cfg.WindowEnd && w.Timezone == cfg.Timezone
+		w.ForceEnabled == cfg.ScheduledForceEnabled && w.WindowStart == cfg.WindowStart && w.WindowEnd == cfg.WindowEnd && w.Timezone == cfg.Timezone
 }
 
 // Called before upstream requests, so errors from a new version check cannot
@@ -96,7 +97,7 @@ func (u *Updater) syncScheduleWindow(cfg Config, now time.Time) error {
 			local := start.In(location)
 			end := time.Date(local.Year(), local.Month(), local.Day(), clock.Hour(), clock.Minute(), 0, 0, location)
 			state.Update.ScheduleWindow = &UpdateScheduleWindow{
-				Day: day, WindowStart: current.Update.WindowStart, WindowEnd: current.Update.WindowEnd,
+				ForceEnabled: current.Update.ScheduledForceEnabled, Day: day, WindowStart: current.Update.WindowStart, WindowEnd: current.Update.WindowEnd,
 				Timezone: current.Update.Timezone, StartAt: start, EndAt: end.UTC(),
 			}
 		}
@@ -133,6 +134,9 @@ func scheduleWindowMissedMessage(w UpdateScheduleWindow, now time.Time) string {
 	}
 	reason := "尚未满足自动更新条件，将继续按配置等待后续机会。"
 	next := "后续将按已启用的空闲或指定时段规则继续检查，仍须连续 10 分钟无使用记录；不会强制更新。"
+	if w.ForceEnabled {
+		next = "后续仍按指定时段强制更新规则检查，不等待空闲；版本确认、执行锁及失败保护仍然有效。"
+	}
 	switch w.Status {
 	case "waiting_idle":
 		reason = "最后一次检查时，尚未满足连续 10 分钟无使用记录的空闲条件。"

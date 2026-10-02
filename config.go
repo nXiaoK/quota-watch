@@ -38,6 +38,7 @@ func mergeConfig(input ConfigInput, previous Config) (Config, error) {
 	if previous.BaseURL != "" && cfg.BaseURL != previous.BaseURL {
 		cfg.Update.IdleEnabled = false
 		cfg.Update.ScheduledEnabled = false
+		cfg.Update.ScheduledForceEnabled = false
 		cfg.Update.NotifyAvailableTelegramEnabled = false
 		cfg.Update.NotifyTelegramEnabled = false
 		cfg.Update.NotifyWindowMissedTelegramEnabled = false

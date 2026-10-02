@@ -173,6 +173,10 @@ func (u *Updater) Tick(ctx context.Context) (tickErr error) {
 	if !cfg.Update.IdleEnabled && !inside {
 		return u.setUpdateState(cfg, func(s *UpdateState) { s.Status = "available" })
 	}
+	if inside && cfg.Update.ScheduledForceEnabled {
+		u.logDiagnostic("idle_check", "skipped_forced", "trigger", "scheduled_force")
+		return u.perform(ctx, cfg, client, now, day, "scheduled_force")
+	}
 	latest, exists, err := client.LatestUsage(ctx)
 	if err != nil {
 		u.logDiagnostic("idle_check", "read_failed", "step", "initial")
@@ -319,6 +323,10 @@ func (u *Updater) observeIdle(cfg Config, now, latest time.Time, exists bool) (b
 }
 
 func (u *Updater) perform(ctx context.Context, cfg Config, client updateAPI, now time.Time, day, trigger string) error {
+	forced := trigger == "scheduled_force"
+	if forced && (!cfg.Update.ScheduledEnabled || !cfg.Update.ScheduledForceEnabled) {
+		return nil
+	}
 	if !u.engine.busy.CompareAndSwap(false, true) {
 		u.logDiagnostic("update", "engine_busy")
 		return u.setUpdateState(cfg, func(s *UpdateState) { s.Status = "waiting_engine"; s.LastError = "" })
@@ -333,8 +341,8 @@ func (u *Updater) perform(ctx context.Context, cfg Config, client updateAPI, now
 		return nil
 	}
 	// A slow version or usage query can cross the end of the scheduled window.
-	// When idle mode is disabled, do not begin a late update.
-	if !cfg.Update.IdleEnabled {
+	// A forced attempt must stay in the window even when idle mode is enabled.
+	if !cfg.Update.IdleEnabled || forced {
 		inside, _, _, err := updateWindow(u.now().UTC(), cfg.Update)
 		if err != nil {
 			return err
@@ -353,16 +361,18 @@ func (u *Updater) perform(ctx context.Context, cfg Config, client updateAPI, now
 			trigger = "idle"
 		}
 	}
-	latest, exists, err := client.LatestUsage(ctx)
-	if err != nil {
-		u.logDiagnostic("idle_check", "read_failed", "step", "before_update")
-		return u.recordUpdateError(cfg, "waiting_idle", fmt.Errorf("更新前复查使用记录失败: %w", err))
+	if !forced {
+		latest, exists, err := client.LatestUsage(ctx)
+		if err != nil {
+			u.logDiagnostic("idle_check", "read_failed", "step", "before_update")
+			return u.recordUpdateError(cfg, "waiting_idle", fmt.Errorf("更新前复查使用记录失败: %w", err))
+		}
+		idle, err := u.observeIdle(cfg, u.now().UTC(), latest, exists)
+		if err != nil || !idle {
+			return err
+		}
 	}
-	idle, err := u.observeIdle(cfg, u.now().UTC(), latest, exists)
-	if err != nil || !idle {
-		return err
-	}
-	if !cfg.Update.IdleEnabled {
+	if !cfg.Update.IdleEnabled || forced {
 		inside, _, _, err := updateWindow(u.now().UTC(), cfg.Update)
 		if err != nil {
 			return err
@@ -416,14 +426,16 @@ func (u *Updater) perform(ctx context.Context, cfg Config, client updateAPI, now
 				"latest_version", state.Update.LatestVersion)
 			return nil
 		}
-		latest, exists, err := client.LatestUsage(ctx)
-		if err != nil {
-			u.logDiagnostic("idle_check", "read_failed", "step", "after_version_preflight")
-			return u.recordUpdateError(cfg, "waiting_idle", fmt.Errorf("版本复查后读取使用记录失败: %w", err))
-		}
-		idle, err := u.observeIdle(cfg, u.now().UTC(), latest, exists)
-		if err != nil || !idle {
-			return err
+		if !forced {
+			latest, exists, err := client.LatestUsage(ctx)
+			if err != nil {
+				u.logDiagnostic("idle_check", "read_failed", "step", "after_version_preflight")
+				return u.recordUpdateError(cfg, "waiting_idle", fmt.Errorf("版本复查后读取使用记录失败: %w", err))
+			}
+			idle, err := u.observeIdle(cfg, u.now().UTC(), latest, exists)
+			if err != nil || !idle {
+				return err
+			}
 		}
 		state, err = u.store.Snapshot()
 		if err != nil {
@@ -496,7 +508,7 @@ func (u *Updater) perform(ctx context.Context, cfg Config, client updateAPI, now
 	}
 	// Persisting the attempt can cross the end of the scheduled window.
 	// Check once more immediately before sending the update request.
-	if !cfg.Update.IdleEnabled {
+	if !cfg.Update.IdleEnabled || forced {
 		inside, _, _, err := updateWindow(u.now().UTC(), cfg.Update)
 		if err != nil || !inside {
 			u.logDiagnostic("update", "window_closed")
@@ -693,6 +705,8 @@ func updateSuccessMessage(previousVersion, version, trigger string, at time.Time
 		method = "空闲触发"
 	case "scheduled":
 		method = "定时触发"
+	case "scheduled_force":
+		method = "指定时段强制更新"
 	}
 	message := "Sub2API 自动更新成功\n当前版本：" + version
 	if previousVersion != "" && previousVersion != version {
@@ -703,6 +717,7 @@ func updateSuccessMessage(previousVersion, version, trigger string, at time.Time
 
 func sameUpdateTriggerSettings(a, b UpdateConfig) bool {
 	return a.IdleEnabled == b.IdleEnabled && a.ScheduledEnabled == b.ScheduledEnabled &&
+		a.ScheduledForceEnabled == b.ScheduledForceEnabled &&
 		a.NotifyAvailableTelegramEnabled == b.NotifyAvailableTelegramEnabled &&
 		a.WindowStart == b.WindowStart && a.WindowEnd == b.WindowEnd && a.Timezone == b.Timezone
 }

@@ -19,7 +19,7 @@ const updateStatus = computed(() => ({
   awaiting_approval: '等待 Telegram 确认', queued: '已加入更新队列', declined: '已拒绝此版本',
   approval_unavailable: 'Telegram 确认不可用', waiting_engine: '等待其他任务结束',
 } as Record<string, string>)[props.update.status] ?? (props.update.status || '尚无记录'))
-const updateTrigger = computed(() => props.update.last_trigger === 'idle' ? '空闲触发' : props.update.last_trigger === 'scheduled' ? '定时触发' : props.update.last_trigger || '')
+const updateTrigger = computed(() => props.update.last_trigger === 'idle' ? '空闲触发' : props.update.last_trigger === 'scheduled' ? '定时触发' : props.update.last_trigger === 'scheduled_force' ? '指定时段强制更新' : props.update.last_trigger || '')
 const updateApprovalStatus = computed(() => ({
   pending: '等待 Telegram 确认', approved: '已批准，等待自动更新条件',
   declined: '已拒绝此版本', superseded: '已有新版本，此选择已失效',
@@ -96,9 +96,10 @@ function submit(action: 'save' | 'connection' | 'telegram' | 'email') {
       <div class="panel-heading"><div class="section-title"><span class="section-icon"><UiIcon name="refresh" /></span><div><h2>Sub2API 自动更新</h2><p class="muted">发现新版本后通知确认，按空闲或指定时段更新站点</p></div></div></div>
       <div class="settings-body">
         <label class="toggle-row"><span><strong>空闲时自动更新</strong><small>需要连续 10 分钟没有任何使用记录；记录读取失败时不会判断为空闲。</small></span><input v-model="draft.update.idle_enabled" class="switch" type="checkbox" role="switch" aria-label="空闲时自动更新 Sub2API" /></label>
-        <label class="toggle-row"><span><strong>指定时段自动更新</strong><small>每天在下方时段内检查新版本，并等待满足连续 10 分钟无使用记录；窗口结束仍不空闲就跳过当天。</small></span><input v-model="draft.update.scheduled_enabled" class="switch" type="checkbox" role="switch" aria-label="指定时段自动更新 Sub2API" /></label>
+        <label class="toggle-row"><span><strong>指定时段自动更新</strong><small>每天在下方时段内检查新版本；默认等待连续 10 分钟无使用记录，窗口结束仍不空闲就跳过当天。开启下方强制更新后不等待空闲。</small></span><input v-model="draft.update.scheduled_enabled" class="switch" type="checkbox" role="switch" aria-label="指定时段自动更新 Sub2API" /></label>
+        <label class="toggle-row"><span><strong>指定时段内强制更新</strong><small>仅在“指定时段自动更新”开启时生效。时段内跳过空闲检查，即使有用户使用记录也会尝试更新，不等到窗口结束；仍须通过版本确认及执行锁检查。更新和重启可能中断正在进行的用户请求，请谨慎开启。</small></span><input v-model="draft.update.scheduled_force_enabled" class="switch" type="checkbox" role="switch" aria-label="指定时段内强制更新 Sub2API" /></label>
         <div class="form-grid three update-window"><label class="field"><span>开始时间</span><input v-model="draft.update.window_start" type="time" step="60" /></label><label class="field"><span>结束时间</span><input v-model="draft.update.window_end" type="time" step="60" /></label><label class="field"><span>时区</span><input v-model="draft.update.timezone" type="text" placeholder="Asia/Shanghai" autocomplete="off" /><small>使用 IANA 时区名称。</small></label></div>
-        <p class="muted caption">两个开关可以独立使用；指定时段默认是 Asia/Shanghai 每天 02:00–03:00。自动更新与上方的订阅自动重置分别控制。</p>
+        <p class="muted caption">空闲与指定时段更新可独立开启；强制选项仅作用于已开启的指定时段更新。指定时段默认是 Asia/Shanghai 每天 02:00–03:00。自动更新与上方的订阅自动重置分别控制。</p>
         <label class="toggle-row"><span><strong>发现新版本时 Telegram 确认</strong><small>检测到新版本后发送带 GitHub 发布页链接的通知；在 Telegram 中选择加入空闲更新队列或拒绝此版本。需启用并配置下方的 Telegram 通道。</small></span><input v-model="draft.update.notify_available_telegram_enabled" class="switch" type="checkbox" role="switch" aria-label="发现 Sub2API 新版本时通过 Telegram 确认" /></label>
         <p class="muted caption">开启后，只有确认的版本才会按上面的空闲或时段规则尝试安装；安装前会再次检查最新版本。拒绝某版本后，即使关闭此开关也不会自动安装该版本；关闭开关后，其他版本恢复无需确认的自动更新。两个自动更新开关都关闭时仍会检查并通知，但不会安装。</p>
         <label class="toggle-row"><span><strong>时段结束未更新时通知 Telegram</strong><small>指定时段结束后，若有待更新版本或检查失败，发送一次未更新原因及最后检查时间；没有新版本或已拒绝的版本不提醒。需开启指定时段自动更新及下方 Telegram 通道。</small></span><input v-model="draft.update.notify_window_missed_telegram_enabled" class="switch" type="checkbox" role="switch" aria-label="Sub2API 时段结束未更新时通知 Telegram" /></label>

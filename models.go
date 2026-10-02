@@ -23,6 +23,7 @@ type UpdateConfig struct {
 	NotifyWindowMissedTelegramEnabled bool   `json:"notify_window_missed_telegram_enabled"`
 	IdleEnabled                       bool   `json:"idle_enabled"`
 	ScheduledEnabled                  bool   `json:"scheduled_enabled"`
+	ScheduledForceEnabled             bool   `json:"scheduled_force_enabled"`
 	NotifyAvailableTelegramEnabled    bool   `json:"notify_available_telegram_enabled"`
 	NotifyTelegramEnabled             bool   `json:"notify_telegram_enabled"`
 	NotifyEmailEnabled                bool   `json:"notify_email_enabled"`
