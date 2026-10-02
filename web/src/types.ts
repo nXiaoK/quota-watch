@@ -35,6 +35,7 @@ export interface Config {
 }
 
 export interface UpdateConfig {
+  notify_window_missed_telegram_enabled: boolean
   idle_enabled: boolean
   scheduled_enabled: boolean
   notify_available_telegram_enabled: boolean

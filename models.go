@@ -20,14 +20,15 @@ type Config struct {
 }
 
 type UpdateConfig struct {
-	IdleEnabled                    bool   `json:"idle_enabled"`
-	ScheduledEnabled               bool   `json:"scheduled_enabled"`
-	NotifyAvailableTelegramEnabled bool   `json:"notify_available_telegram_enabled"`
-	NotifyTelegramEnabled          bool   `json:"notify_telegram_enabled"`
-	NotifyEmailEnabled             bool   `json:"notify_email_enabled"`
-	WindowStart                    string `json:"window_start"`
-	WindowEnd                      string `json:"window_end"`
-	Timezone                       string `json:"timezone"`
+	NotifyWindowMissedTelegramEnabled bool   `json:"notify_window_missed_telegram_enabled"`
+	IdleEnabled                       bool   `json:"idle_enabled"`
+	ScheduledEnabled                  bool   `json:"scheduled_enabled"`
+	NotifyAvailableTelegramEnabled    bool   `json:"notify_available_telegram_enabled"`
+	NotifyTelegramEnabled             bool   `json:"notify_telegram_enabled"`
+	NotifyEmailEnabled                bool   `json:"notify_email_enabled"`
+	WindowStart                       string `json:"window_start"`
+	WindowEnd                         string `json:"window_end"`
+	Timezone                          string `json:"timezone"`
 }
 
 func defaultUpdateConfig() UpdateConfig {
@@ -258,21 +259,23 @@ type UpdateApproval struct {
 }
 
 type UpdateState struct {
-	Status                string    `json:"status"`
-	CurrentVersion        string    `json:"current_version,omitempty"`
-	LatestVersion         string    `json:"latest_version,omitempty"`
-	DeclinedVersions      []string  `json:"declined_versions,omitempty"`
-	HasUpdate             bool      `json:"has_update"`
-	LastCheckAt           time.Time `json:"last_check_at"`
-	LastAttemptAt         time.Time `json:"last_attempt_at"`
-	LastSuccessAt         time.Time `json:"last_success_at"`
-	LastError             string    `json:"last_error,omitempty"`
-	LastTrigger           string    `json:"last_trigger,omitempty"`
-	LastAttemptVersion    string    `json:"last_attempt_version,omitempty"`
-	LastAttemptDate       string    `json:"last_attempt_date,omitempty"`
-	LastScheduleCheckDate string    `json:"last_schedule_check_date,omitempty"`
-	EmptySince            time.Time `json:"empty_since"`
-	OperationID           string    `json:"operation_id,omitempty"`
+	ScheduleWindow        *UpdateScheduleWindow `json:"schedule_window,omitempty"`
+	LastUsageAt           time.Time             `json:"last_usage_at,omitempty"`
+	Status                string                `json:"status"`
+	CurrentVersion        string                `json:"current_version,omitempty"`
+	LatestVersion         string                `json:"latest_version,omitempty"`
+	DeclinedVersions      []string              `json:"declined_versions,omitempty"`
+	HasUpdate             bool                  `json:"has_update"`
+	LastCheckAt           time.Time             `json:"last_check_at"`
+	LastAttemptAt         time.Time             `json:"last_attempt_at"`
+	LastSuccessAt         time.Time             `json:"last_success_at"`
+	LastError             string                `json:"last_error,omitempty"`
+	LastTrigger           string                `json:"last_trigger,omitempty"`
+	LastAttemptVersion    string                `json:"last_attempt_version,omitempty"`
+	LastAttemptDate       string                `json:"last_attempt_date,omitempty"`
+	LastScheduleCheckDate string                `json:"last_schedule_check_date,omitempty"`
+	EmptySince            time.Time             `json:"empty_since"`
+	OperationID           string                `json:"operation_id,omitempty"`
 }
 
 type ManualTarget struct {

@@ -1283,6 +1283,8 @@ func (e *Engine) sendDelivery(ctx context.Context, original Delivery) error {
 			if original.Kind == "update_success" {
 				enabled = enabled && ((original.Channel == "telegram" && cfg.Update.NotifyTelegramEnabled) ||
 					(original.Channel == "email" && cfg.Update.NotifyEmailEnabled))
+			} else if original.Kind == "update_window_missed" {
+				enabled = enabled && original.Channel == "telegram" && cfg.Update.ScheduledEnabled && cfg.Update.NotifyWindowMissedTelegramEnabled
 			} else if original.Kind == "update_available" {
 				enabled = enabled && original.Channel == "telegram" && cfg.Update.NotifyAvailableTelegramEnabled
 			}
@@ -1290,6 +1292,8 @@ func (e *Engine) sendDelivery(ctx context.Context, original Delivery) error {
 				reason := "通知渠道已关闭"
 				if item.Kind == "update_success" {
 					reason = "更新成功通知或通知渠道已关闭"
+				} else if item.Kind == "update_window_missed" {
+					reason = "时段未更新通知、指定时段更新或 Telegram 通道已关闭"
 				} else if item.Kind == "update_available" {
 					reason = "新版本确认或 Telegram 通道已关闭"
 				}

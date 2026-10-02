@@ -17,7 +17,7 @@ const updateStatus = computed(() => ({
   checking: '正在检查更新', check_failed: '检查更新失败', updating: '正在更新', restarting: '等待站点重启',
   success: '更新成功', failed: '更新失败', unknown: '结果待核对', already_attempted: '已尝试此版本',
   awaiting_approval: '等待 Telegram 确认', queued: '已加入更新队列', declined: '已拒绝此版本',
-  approval_unavailable: 'Telegram 确认不可用',
+  approval_unavailable: 'Telegram 确认不可用', waiting_engine: '等待其他任务结束',
 } as Record<string, string>)[props.update.status] ?? (props.update.status || '尚无记录'))
 const updateTrigger = computed(() => props.update.last_trigger === 'idle' ? '空闲触发' : props.update.last_trigger === 'scheduled' ? '定时触发' : props.update.last_trigger || '')
 const updateApprovalStatus = computed(() => ({
@@ -101,6 +101,7 @@ function submit(action: 'save' | 'connection' | 'telegram' | 'email') {
         <p class="muted caption">两个开关可以独立使用；指定时段默认是 Asia/Shanghai 每天 02:00–03:00。自动更新与上方的订阅自动重置分别控制。</p>
         <label class="toggle-row"><span><strong>发现新版本时 Telegram 确认</strong><small>检测到新版本后发送带 GitHub 发布页链接的通知；在 Telegram 中选择加入空闲更新队列或拒绝此版本。需启用并配置下方的 Telegram 通道。</small></span><input v-model="draft.update.notify_available_telegram_enabled" class="switch" type="checkbox" role="switch" aria-label="发现 Sub2API 新版本时通过 Telegram 确认" /></label>
         <p class="muted caption">开启后，只有确认的版本才会按上面的空闲或时段规则尝试安装；安装前会再次检查最新版本。拒绝某版本后，即使关闭此开关也不会自动安装该版本；关闭开关后，其他版本恢复无需确认的自动更新。两个自动更新开关都关闭时仍会检查并通知，但不会安装。</p>
+        <label class="toggle-row"><span><strong>时段结束未更新时通知 Telegram</strong><small>指定时段结束后，若有待更新版本或检查失败，发送一次未更新原因及最后检查时间；没有新版本或已拒绝的版本不提醒。需开启指定时段自动更新及下方 Telegram 通道。</small></span><input v-model="draft.update.notify_window_missed_telegram_enabled" class="switch" type="checkbox" role="switch" aria-label="Sub2API 时段结束未更新时通知 Telegram" /></label>
         <label class="toggle-row"><span><strong>更新成功后通知 Telegram</strong><small>更新、重启及版本核对成功后发送；还需启用并配置下方的 Telegram 通道。</small></span><input v-model="draft.update.notify_telegram_enabled" class="switch" type="checkbox" role="switch" aria-label="Sub2API 更新成功后通知 Telegram" /></label>
         <label class="toggle-row"><span><strong>更新成功后通知邮件</strong><small>更新、重启及版本核对成功后发送；还需启用并配置下方的邮件通道。</small></span><input v-model="draft.update.notify_email_enabled" class="switch" type="checkbox" role="switch" aria-label="Sub2API 更新成功后通知邮件" /></label>
         <div class="inline-message warning">Sub2API 若运行在 Docker 容器中，API 原地更新不会写回镜像，重建容器后更新会丢失；请通过更新镜像部署新版本。</div>

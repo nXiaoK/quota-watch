@@ -40,6 +40,7 @@ func mergeConfig(input ConfigInput, previous Config) (Config, error) {
 		cfg.Update.ScheduledEnabled = false
 		cfg.Update.NotifyAvailableTelegramEnabled = false
 		cfg.Update.NotifyTelegramEnabled = false
+		cfg.Update.NotifyWindowMissedTelegramEnabled = false
 		cfg.Update.NotifyEmailEnabled = false
 	}
 	if cfg.AdminAPIKey == "" && !input.ClearAdminAPIKey {
@@ -111,6 +112,9 @@ func mergeConfig(input ConfigInput, previous Config) (Config, error) {
 	}
 	if cfg.Telegram.Enabled && (cfg.Telegram.BotToken == "" || cfg.Telegram.ChatID == "") {
 		return Config{}, errors.New("启用 Telegram 时请填写 Token 和 Chat ID")
+	}
+	if cfg.Update.NotifyWindowMissedTelegramEnabled && !cfg.Telegram.Enabled {
+		return Config{}, errors.New("启用时段未更新 Telegram 通知前请先启用 Telegram 通道")
 	}
 	if cfg.Update.NotifyTelegramEnabled && !cfg.Telegram.Enabled {
 		return Config{}, errors.New("启用更新成功 Telegram 通知前请先启用 Telegram 通道")

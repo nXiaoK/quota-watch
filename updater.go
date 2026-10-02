@@ -73,7 +73,7 @@ func (u *Updater) Run(ctx context.Context) {
 	}
 }
 
-func (u *Updater) Tick(ctx context.Context) error {
+func (u *Updater) Tick(ctx context.Context) (tickErr error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -81,6 +81,11 @@ func (u *Updater) Tick(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	now := u.now().UTC()
+	if err := u.syncScheduleWindow(cfg, now); err != nil {
+		return err
+	}
+	defer func() { tickErr = errors.Join(tickErr, u.recordScheduleOutcome(cfg, now)) }()
 	if !cfg.Update.IdleEnabled && !cfg.Update.ScheduledEnabled && !cfg.Update.NotifyAvailableTelegramEnabled {
 		state, err := u.store.Snapshot()
 		if err != nil {
@@ -108,7 +113,6 @@ func (u *Updater) Tick(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	now := u.now().UTC()
 	if state.Update.Status == "updating" || state.Update.Status == "restarting" || state.Update.Status == "unknown" {
 		return u.reconcile(ctx, cfg, client, state.Update, now)
 	}
@@ -286,6 +290,10 @@ func (u *Updater) observeIdle(cfg Config, now, latest time.Time, exists bool) (b
 	idle := exists && !latest.After(now.Add(-updateIdlePeriod)) || !exists && now.Sub(firstEmpty) >= updateIdlePeriod
 	err = u.setUpdateState(cfg, func(s *UpdateState) {
 		s.EmptySince = firstEmpty
+		s.LastUsageAt = latest
+		if !exists {
+			s.LastUsageAt = time.Time{}
+		}
 		s.LastError = ""
 		if !idle {
 			s.Status = "waiting_idle"
@@ -313,7 +321,7 @@ func (u *Updater) observeIdle(cfg Config, now, latest time.Time, exists bool) (b
 func (u *Updater) perform(ctx context.Context, cfg Config, client updateAPI, now time.Time, day, trigger string) error {
 	if !u.engine.busy.CompareAndSwap(false, true) {
 		u.logDiagnostic("update", "engine_busy")
-		return nil
+		return u.setUpdateState(cfg, func(s *UpdateState) { s.Status = "waiting_engine"; s.LastError = "" })
 	}
 	defer u.engine.busy.Store(false)
 	current, err := u.store.Config()
